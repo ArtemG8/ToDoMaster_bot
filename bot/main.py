@@ -27,15 +27,51 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 def init_db():
     conn = sqlite3.connect(DATABASE_NAME)
     cursor = conn.cursor()
+
+    # Создаем таблицу, если она не существует. task_number будет INTEGER, изначально может быть NULL для миграции.
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS tasks (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             user_id INTEGER NOT NULL,
+            task_number INTEGER, -- Позволяем NULL изначально для совместимости при миграции
             description TEXT NOT NULL,
             deadline TEXT
         )
     ''')
     conn.commit()
+
+    # Проверяем, существует ли столбец task_number
+    cursor.execute("PRAGMA table_info(tasks)")
+    columns = [col[1] for col in cursor.fetchall()]
+
+    if 'task_number' not in columns:
+        # Если столбца task_number нет, добавляем его
+        cursor.execute("ALTER TABLE tasks ADD COLUMN task_number INTEGER;")
+        conn.commit()
+
+        # Заполняем task_number для существующих записей для каждого пользователя
+        cursor.execute("SELECT DISTINCT user_id FROM tasks")
+        user_ids = cursor.fetchall()
+
+        for user_id_tuple in user_ids:
+            user_id = user_id_tuple[0]
+            # Выбираем задачи пользователя, сортируя по id, чтобы сохранить порядок
+            cursor.execute("SELECT id FROM tasks WHERE user_id = ? ORDER BY id", (user_id,))
+            user_tasks = cursor.fetchall()
+
+            for i, task_id_tuple in enumerate(user_tasks):
+                task_id = task_id_tuple[0]
+                # Присваиваем последовательный номер задачи
+                cursor.execute("UPDATE tasks SET task_number = ? WHERE id = ?", (i + 1, task_id))
+            conn.commit()
+
+    # Создаем уникальный индекс для (user_id, task_number)
+    try:
+        cursor.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_user_task_number ON tasks (user_id, task_number);")
+        conn.commit()
+    except sqlite3.OperationalError as e:
+        logging.warning(f"Could not create unique index 'idx_user_task_number': {e}. Please check your database for duplicate (user_id, task_number) pairs if this warning persists.")
+
     conn.close()
 
 
@@ -66,13 +102,13 @@ class AddTask(StatesGroup):
     waiting_for_deadline = State()
 
 class EditTask(StatesGroup):
-    waiting_for_task_id = State()
+    waiting_for_task_number = State()
     waiting_for_new_data = State()
     waiting_for_new_description = State()
     waiting_for_new_deadline = State()
 
 class DeleteTask(StatesGroup):
-    waiting_for_task_id = State()
+    waiting_for_task_number = State()
     waiting_for_confirmation = State()
 
 #роутеры
@@ -106,7 +142,7 @@ async def start_command(message: types.Message):
 # Обработчики добавления задачи
 @task_router.message(Command("add_task"))
 async def cmd_add_task(message: types.Message, state: FSMContext):
-    await message.answer("Отлично! Что нужно сделать? Опишите задачу.")
+    await message.answer("Отлично! Что нужно сделать? Опишите задачу.", reply_markup=types.ReplyKeyboardRemove())
     await state.set_state(AddTask.waiting_for_description)
 
 
@@ -135,14 +171,21 @@ async def process_add_deadline_calendar(callback_query: types.CallbackQuery, cal
 
         conn = sqlite3.connect(DATABASE_NAME)
         cursor = conn.cursor()
-        cursor.execute("INSERT INTO tasks (user_id, description, deadline) VALUES (?, ?, ?)",
-                       (user_id, description, deadline_str))
+
+        # Находим следующий свободный task_number для текущего пользователя
+        # Максимальный task_number или 0, если задач нет
+        cursor.execute("SELECT MAX(task_number) FROM tasks WHERE user_id = ?", (user_id,))
+        max_task_number = cursor.fetchone()[0]
+        new_task_number = (max_task_number or 0) + 1
+
+        cursor.execute("INSERT INTO tasks (user_id, task_number, description, deadline) VALUES (?, ?, ?, ?)",
+                       (user_id, new_task_number, description, deadline_str))
         conn.commit()
         conn.close()
 
         formatted_deadline_display = format_deadline(deadline_str)
         await callback_query.message.edit_text(
-            f"Задача '{description}' со сроком выполнения '{formatted_deadline_display}' добавлена!")
+            f"Задача '{description}' (Номер: {new_task_number}) со сроком выполнения '{formatted_deadline_display}' добавлена!\nХотите ещё? /add_task \nПосмотреть все задачи: /list_tasks")
         await state.clear()
         await callback_query.answer()
     else:
@@ -155,7 +198,8 @@ async def cmd_list_tasks(message: types.Message):
     user_id = message.from_user.id
     conn = sqlite3.connect(DATABASE_NAME)
     cursor = conn.cursor()
-    cursor.execute("SELECT id, description, deadline FROM tasks WHERE user_id = ?", (user_id,))
+    # Выбираем task_number вместо id для отображения пользователю
+    cursor.execute("SELECT task_number, description, deadline FROM tasks WHERE user_id = ? ORDER BY task_number", (user_id,))
     tasks = cursor.fetchall()
     conn.close()
 
@@ -164,13 +208,13 @@ async def cmd_list_tasks(message: types.Message):
         return
 
     response = "Ваши текущие задачи:\n\n"
-    for i, task in enumerate(tasks):
-        task_id, description, deadline = task
+    for task in tasks:
+        task_number, description, deadline = task # task_number - это номер для пользователя
         formatted_deadline = format_deadline(deadline)
         deadline_str = f" (Срок выполнения: {formatted_deadline})" if formatted_deadline else ""
-        response += f"{task_id}.\n   Задача: {description}{deadline_str}\n"
+        response += f"Номер: {task_number}.\n   Задача: {description}{deadline_str}\n"
 
-    await message.answer(response)
+    await message.answer(response, reply_markup=types.ReplyKeyboardRemove())
 
 
 #  Обработчики редактирования задачи
@@ -179,7 +223,8 @@ async def cmd_edit_task(message: types.Message, state: FSMContext):
     user_id = message.from_user.id
     conn = sqlite3.connect(DATABASE_NAME)
     cursor = conn.cursor()
-    cursor.execute("SELECT id, description, deadline FROM tasks WHERE user_id = ?", (user_id,))
+    # Выбираем task_number вместо id для отображения пользователю
+    cursor.execute("SELECT task_number, description, deadline FROM tasks WHERE user_id = ? ORDER BY task_number", (user_id,))
     tasks = cursor.fetchall()
     conn.close()
 
@@ -189,36 +234,41 @@ async def cmd_edit_task(message: types.Message, state: FSMContext):
         return
 
     response = "Выберите задачу для редактирования, указав её номер:\n\n"
-    for task_id, description, deadline in tasks:
+    for task_number, description, deadline in tasks:
         formatted_deadline = format_deadline(deadline)
         deadline_str = f" (Срок выполнения: {formatted_deadline})" if formatted_deadline else ""
-        response += f"Номер: {task_id}\n   Задача: {description}{deadline_str}\n"
+        response += f"Номер: {task_number}\n   Задача: {description}{deadline_str}\n"
     response += "\nВведите номер задачи, которую хотите изменить."
 
-    await message.answer(response)
-    await state.set_state(EditTask.waiting_for_task_id)
+    await message.answer(response, reply_markup=types.ReplyKeyboardRemove())
+    await state.set_state(EditTask.waiting_for_task_number)
 
 
-@task_router.message(EditTask.waiting_for_task_id)
-async def process_edit_task_id(message: types.Message, state: FSMContext):
+@task_router.message(EditTask.waiting_for_task_number)
+async def process_edit_task_number(message: types.Message, state: FSMContext):
     try:
-        task_id = int(message.text)
+        user_provided_task_number = int(message.text)
     except ValueError:
-        await message.answer("Пожалуйста, введите корректный числовой ID задачи.")
+        await message.answer("Пожалуйста, введите корректный числовой номер задачи.")
         return
 
     user_id = message.from_user.id
     conn = sqlite3.connect(DATABASE_NAME)
     cursor = conn.cursor()
-    cursor.execute("SELECT id, description, deadline FROM tasks WHERE user_id = ? AND id = ?", (user_id, task_id))
+    # Ищем задачу по user_id и user_provided_task_number, получаем внутренний id
+    cursor.execute("SELECT id, task_number, description, deadline FROM tasks WHERE user_id = ? AND task_number = ?", (user_id, user_provided_task_number))
     task = cursor.fetchone()
     conn.close()
 
     if not task:
-        await message.answer("Задача с таким ID не найдена или не принадлежит вам. Пожалуйста, введите корректный ID.")
+        await message.answer("Задача с таким номером не найдена или не принадлежит вам. Пожалуйста, введите корректный номер.")
         return
 
-    await state.update_data(editing_task_id=task_id)
+    # Сохраняем и внутренний id базы данных, и номер задачи для пользователя
+    internal_db_id = task[0]
+    task_number_for_user = task[1]
+
+    await state.update_data(editing_internal_db_id=internal_db_id, editing_task_number=task_number_for_user)
     keyboard = types.ReplyKeyboardMarkup(
         keyboard=[
             [types.KeyboardButton(text="Описание"), types.KeyboardButton(text="Срок выполнения")],
@@ -228,11 +278,11 @@ async def process_edit_task_id(message: types.Message, state: FSMContext):
         one_time_keyboard=True
     )
 
-    formatted_current_deadline_display = format_deadline(task[2])
+    formatted_current_deadline_display = format_deadline(task[3]) # deadline находится в task[3]
     deadline_display = f"Срок выполнения: {formatted_current_deadline_display}" if formatted_current_deadline_display else "Срок выполнения: не указан"
 
     await message.answer(
-        f"Вы выбрали задачу:\nНомер: {task[0]}\nЗадача: {task[1]}\n{deadline_display}\n\nЧто хотите изменить?",
+        f"Вы выбрали задачу:\nНомер: {task_number_for_user}\nЗадача: {task[2]}\n{deadline_display}\n\nЧто хотите изменить?", # task[2] - это description
         reply_markup=keyboard)
     await state.set_state(EditTask.waiting_for_new_data)
 
@@ -261,18 +311,19 @@ async def process_new_description(message: types.Message, state: FSMContext):
         return
 
     data = await state.get_data()
-    task_id = data['editing_task_id']
+    internal_db_id = data['editing_internal_db_id'] # Используем внутренний id для обновления
+    task_number_for_user = data['editing_task_number'] # Используем для отображения
     new_description = message.text
 
     conn = sqlite3.connect(DATABASE_NAME)
     cursor = conn.cursor()
     cursor.execute("UPDATE tasks SET description = ? WHERE id = ? AND user_id = ?",
-                   (new_description, task_id, message.from_user.id))
+                   (new_description, internal_db_id, message.from_user.id)) # Обновляем по внутреннему id
     conn.commit()
     conn.close()
 
     if cursor.rowcount > 0:
-        await message.answer(f"Описание задачи (Номер: {task_id}) обновлено на: '{new_description}'")
+        await message.answer(f"Описание задачи (Номер: {task_number_for_user}) обновлено на: '{new_description}'")
     else:
         await message.answer("Не удалось обновить задачу. Возможно, задача не найдена или не принадлежит вам.")
     await state.clear()
@@ -285,21 +336,22 @@ async def process_edit_deadline_calendar(callback_query: types.CallbackQuery, ca
     selected, date = await simple_calendar.process_selection(callback_query, callback_data)
     if selected:
         data = await state.get_data()
-        task_id = data['editing_task_id']
+        internal_db_id = data['editing_internal_db_id'] # Используем внутренний id для обновления
+        task_number_for_user = data['editing_task_number'] # Используем для отображения
         user_id = callback_query.from_user.id
         deadline_str = f"{date.strftime('%Y-%m-%d')}"
 
         conn = sqlite3.connect(DATABASE_NAME)
         cursor = conn.cursor()
         cursor.execute("UPDATE tasks SET deadline = ? WHERE id = ? AND user_id = ?",
-                       (deadline_str, task_id, user_id))
+                       (deadline_str, internal_db_id, user_id)) # Обновляем по внутреннему id
         conn.commit()
         conn.close()
 
         if cursor.rowcount > 0:
             formatted_deadline_display = format_deadline(deadline_str)
             await callback_query.message.edit_text(
-                f"Срок выполнения задачи (Номер: {task_id}) обновлен на: '{formatted_deadline_display}'")
+                f"Срок выполнения задачи (Номер: {task_number_for_user}) обновлен на: '{formatted_deadline_display}'")
         else:
             await callback_query.message.edit_text(
                 "Не удалось обновить задачу. Возможно, задача не найдена или не принадлежит вам.")
@@ -316,7 +368,8 @@ async def cmd_delete_task(message: types.Message, state: FSMContext):
     user_id = message.from_user.id
     conn = sqlite3.connect(DATABASE_NAME)
     cursor = conn.cursor()
-    cursor.execute("SELECT id, description, deadline FROM tasks WHERE user_id = ?", (user_id,))
+    # Выбираем task_number вместо id для отображения пользователю
+    cursor.execute("SELECT task_number, description, deadline FROM tasks WHERE user_id = ? ORDER BY task_number", (user_id,))
     tasks = cursor.fetchall()
     conn.close()
 
@@ -326,28 +379,29 @@ async def cmd_delete_task(message: types.Message, state: FSMContext):
         return
 
     response = "Выберите задачу для удаления, указав её номер:\n\n"
-    for task_id, description, deadline in tasks:
+    for task_number, description, deadline in tasks:
         formatted_deadline = format_deadline(deadline)
         deadline_str = f" (Срок выполнения: {formatted_deadline})" if formatted_deadline else ""
-        response += f"Номер: {task_id}\n   Задача: {description}{deadline_str}\n"
+        response += f"Номер: {task_number}\n   Задача: {description}{deadline_str}\n"
     response += "\nВведите номер задачи, которую хотите удалить."
 
     await message.answer(response)
-    await state.set_state(DeleteTask.waiting_for_task_id)
+    await state.set_state(DeleteTask.waiting_for_task_number)
 
 
-@task_router.message(DeleteTask.waiting_for_task_id)
-async def process_delete_task_id(message: types.Message, state: FSMContext):
+@task_router.message(DeleteTask.waiting_for_task_number)
+async def process_delete_task_number(message: types.Message, state: FSMContext):
     try:
-        task_id = int(message.text)
+        user_provided_task_number = int(message.text)
     except ValueError:
-        await message.answer("Пожалуйста, введите корректный числовой ID задачи.")
+        await message.answer("Пожалуйста, введите корректный числовой номер задачи.")
         return
 
     user_id = message.from_user.id
     conn = sqlite3.connect(DATABASE_NAME)
     cursor = conn.cursor()
-    cursor.execute("SELECT id, description, deadline FROM tasks WHERE user_id = ? AND id = ?", (user_id, task_id))
+    # Ищем задачу по user_id и user_provided_task_number, получаем внутренний id
+    cursor.execute("SELECT id, task_number, description, deadline FROM tasks WHERE user_id = ? AND task_number = ?", (user_id, user_provided_task_number))
     task = cursor.fetchone()
     conn.close()
 
@@ -355,7 +409,11 @@ async def process_delete_task_id(message: types.Message, state: FSMContext):
         await message.answer("Задача с таким номером не найдена или не принадлежит вам. Пожалуйста, введите корректный номер.")
         return
 
-    await state.update_data(deleting_task_id=task_id, deleting_task_desc=task[1])
+    internal_db_id = task[0]
+    task_number_for_user = task[1]
+    task_description = task[2] # Описание задачи
+
+    await state.update_data(deleting_internal_db_id=internal_db_id, deleting_task_number=task_number_for_user, deleting_task_desc=task_description)
 
     keyboard = types.ReplyKeyboardMarkup(
         keyboard=[
@@ -364,7 +422,7 @@ async def process_delete_task_id(message: types.Message, state: FSMContext):
         resize_keyboard=True,
         one_time_keyboard=True
     )
-    await message.answer(f"Вы уверены, что хотите удалить задачу (Номер: {task[0]}): '{task[1]}'? (Да/Нет)",
+    await message.answer(f"Вы уверены, что хотите удалить задачу (Номер: {task_number_for_user}): '{task_description}'? (Да/Нет)", # Используем номер для пользователя
                          reply_markup=keyboard)
     await state.set_state(DeleteTask.waiting_for_confirmation)
 
@@ -373,18 +431,19 @@ async def process_delete_task_id(message: types.Message, state: FSMContext):
 async def process_delete_confirmation(message: types.Message, state: FSMContext):
     if message.text == "Да":
         data = await state.get_data()
-        task_id = data['deleting_task_id']
+        internal_db_id = data['deleting_internal_db_id'] # Используем внутренний id для удаления
+        task_number_for_user = data['deleting_task_number'] # Используем для отображения
         task_description = data['deleting_task_desc']
         user_id = message.from_user.id
 
         conn = sqlite3.connect(DATABASE_NAME)
         cursor = conn.cursor()
-        cursor.execute("DELETE FROM tasks WHERE id = ? AND user_id = ?", (task_id, user_id))
+        cursor.execute("DELETE FROM tasks WHERE id = ? AND user_id = ?", (internal_db_id, user_id)) # Удаляем по внутреннему id
         conn.commit()
         conn.close()
 
         if cursor.rowcount > 0:
-            await message.answer(f"Задача '{task_description}' (Номер: {task_id}) успешно удалена.",
+            await message.answer(f"Задача '{task_description}' (Номер: {task_number_for_user}) успешно удалена.",
                                  reply_markup=types.ReplyKeyboardRemove())
         else:
             await message.answer("Не удалось удалить задачу. Возможно, задача уже была удалена или не принадлежит вам.",
@@ -410,3 +469,4 @@ if __name__ == "__main__":
         print("Бот остановлен.")
     except Exception as e:
         print(f"Произошла ошибка: {e}")
+
