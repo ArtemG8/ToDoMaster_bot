@@ -8,16 +8,22 @@ from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 
+# Импортируем календарь
+from aiogram_calendar import SimpleCalendar, SimpleCalendarCallback
+simple_calendar = SimpleCalendar()
+
+# Конфигурация
 TOKEN = "7860468847:AAG1fHL18lU0Rpnq6ey81vv1vWLRWg7frbQ"
 DATABASE_NAME = 'todo.db'
 
+# Инициализация бота и диспетчера
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
 
 # Включаем логирование
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(name)s - %(message)s')
 
-# Настройка базы данных
+#  Настройка базы данных
 def init_db():
     conn = sqlite3.connect(DATABASE_NAME)
     cursor = conn.cursor()
@@ -31,6 +37,28 @@ def init_db():
     ''')
     conn.commit()
     conn.close()
+
+
+# Форматирование дедлайна
+def format_deadline(deadline_str):
+    if not deadline_str:
+        return ""
+    try:
+        dt_object = datetime.strptime(deadline_str, '%Y-%m-%d')
+        months = [
+            "", "января", "февраля", "марта", "апреля", "мая", "июня",
+            "июля", "августа", "сентября", "октября", "ноября", "декабря"
+        ]
+        day = dt_object.day
+        month_name = months[dt_object.month]
+        current_year = datetime.now().year
+        if dt_object.year == current_year:
+            return f"{day} {month_name}"
+        else:
+            return f"{day} {month_name} {dt_object.year}"
+    except ValueError:
+        return deadline_str
+
 
 # Состояния для FSM
 class AddTask(StatesGroup):
@@ -47,10 +75,12 @@ class DeleteTask(StatesGroup):
     waiting_for_task_id = State()
     waiting_for_confirmation = State()
 
-# Роутеры
+#роутеры
 welcome_router = Router()
 task_router = Router()
 
+
+# Обработчик команды /start
 @welcome_router.message(Command("start"))
 async def start_command(message: types.Message):
     welcome_text = """
@@ -72,11 +102,13 @@ async def start_command(message: types.Message):
 """
     await message.answer(welcome_text)
 
+
 # Обработчики добавления задачи
 @task_router.message(Command("add_task"))
 async def cmd_add_task(message: types.Message, state: FSMContext):
     await message.answer("Отлично! Что нужно сделать? Опишите задачу.")
     await state.set_state(AddTask.waiting_for_description)
+
 
 @task_router.message(AddTask.waiting_for_description)
 async def process_description(message: types.Message, state: FSMContext):
@@ -84,35 +116,38 @@ async def process_description(message: types.Message, state: FSMContext):
         await message.answer("Пожалуйста, введите описание задачи текстом.")
         return
     await state.update_data(description=message.text)
-    await message.answer("Теперь укажите срок выполнения (дедлайн) в формате ГГГГ-ММ-ДД ЧЧ:ММ (например, 2025-12-31 18:00). Если дедлайн не нужен, напишите 'нет'.")
+    # Вместо текстового ввода дедлайна, отправляем календарь
+    await message.answer("Теперь выберите срок выполнения (дедлайн) с помощью календаря:",
+                         reply_markup=await simple_calendar.start_calendar())
     await state.set_state(AddTask.waiting_for_deadline)
 
-@task_router.message(AddTask.waiting_for_deadline)
-async def process_deadline(message: types.Message, state: FSMContext):
-    user_id = message.from_user.id
-    data = await state.get_data()
-    description = data['description']
-    deadline = message.text.strip()
 
-    if deadline.lower() == 'нет':
-        deadline = None
+# Обработчик выбора даты из календаря для добавления задачи
+@task_router.callback_query(SimpleCalendarCallback.filter(), AddTask.waiting_for_deadline)
+async def process_add_deadline_calendar(callback_query: types.CallbackQuery, callback_data: SimpleCalendarCallback,
+                                        state: FSMContext):
+    selected, date = await simple_calendar.process_selection(callback_query, callback_data)
+    if selected:
+        user_id = callback_query.from_user.id
+        data = await state.get_data()
+        description = data['description']
+        deadline_str = f"{date.strftime('%Y-%m-%d')}"
+
+        conn = sqlite3.connect(DATABASE_NAME)
+        cursor = conn.cursor()
+        cursor.execute("INSERT INTO tasks (user_id, description, deadline) VALUES (?, ?, ?)",
+                       (user_id, description, deadline_str))
+        conn.commit()
+        conn.close()
+
+        formatted_deadline_display = format_deadline(deadline_str)
+        await callback_query.message.edit_text(
+            f"Задача '{description}' со сроком выполнения '{formatted_deadline_display}' добавлена!")
+        await state.clear()
+        await callback_query.answer()
     else:
-        try:
-            # пробуем распарсить дедлайн для проверки формата
-            datetime.strptime(deadline, '%Y-%m-%d %H:%M')
-        except ValueError:
-            await message.answer("Неверный формат даты/времени. Пожалуйста, используйте ГГГГ-ММ-ДД ЧЧ:ММ или напишите 'нет'.")
-            return
+        await callback_query.answer()
 
-    conn = sqlite3.connect(DATABASE_NAME)
-    cursor = conn.cursor()
-    cursor.execute("INSERT INTO tasks (user_id, description, deadline) VALUES (?, ?, ?)",
-                   (user_id, description, deadline))
-    conn.commit()
-    conn.close()
-
-    await message.answer(f"Задача '{description}' с дедлайном '{deadline if deadline else 'не указан'}' добавлена!")
-    await state.clear()
 
 # Обработчик просмотра задач
 @task_router.message(Command("list_tasks"))
@@ -131,12 +166,14 @@ async def cmd_list_tasks(message: types.Message):
     response = "Ваши текущие задачи:\n\n"
     for i, task in enumerate(tasks):
         task_id, description, deadline = task
-        deadline_str = f" (Дедлайн: {deadline})" if deadline else ""
-        response += f"{i+1}. ID: {task_id}\n   Задача: {description}{deadline_str}\n"
+        formatted_deadline = format_deadline(deadline)
+        deadline_str = f" (Срок выполнения: {formatted_deadline})" if formatted_deadline else ""
+        response += f"{task_id}.\n   Задача: {description}{deadline_str}\n"
 
     await message.answer(response)
 
-# Обработчики редактирования задачи
+
+#  Обработчики редактирования задачи
 @task_router.message(Command("edit_task"))
 async def cmd_edit_task(message: types.Message, state: FSMContext):
     user_id = message.from_user.id
@@ -151,14 +188,16 @@ async def cmd_edit_task(message: types.Message, state: FSMContext):
         await state.clear()
         return
 
-    response = "Выберите задачу для редактирования, указав её ID:\n\n"
+    response = "Выберите задачу для редактирования, указав её номер:\n\n"
     for task_id, description, deadline in tasks:
-        deadline_str = f" (Дедлайн: {deadline})" if deadline else ""
-        response += f"ID: {task_id}\n   Задача: {description}{deadline_str}\n"
-    response += "\nВведите ID задачи, которую хотите изменить."
+        formatted_deadline = format_deadline(deadline)
+        deadline_str = f" (Срок выполнения: {formatted_deadline})" if formatted_deadline else ""
+        response += f"Номер: {task_id}\n   Задача: {description}{deadline_str}\n"
+    response += "\nВведите номер задачи, которую хотите изменить."
 
     await message.answer(response)
     await state.set_state(EditTask.waiting_for_task_id)
+
 
 @task_router.message(EditTask.waiting_for_task_id)
 async def process_edit_task_id(message: types.Message, state: FSMContext):
@@ -182,16 +221,23 @@ async def process_edit_task_id(message: types.Message, state: FSMContext):
     await state.update_data(editing_task_id=task_id)
     keyboard = types.ReplyKeyboardMarkup(
         keyboard=[
-            [types.KeyboardButton(text="Описание"), types.KeyboardButton(text="Дедлайн")],
+            [types.KeyboardButton(text="Описание"), types.KeyboardButton(text="Срок выполнения")],
             [types.KeyboardButton(text="Отмена")]
         ],
         resize_keyboard=True,
         one_time_keyboard=True
     )
-    await message.answer(f"Вы выбрали задачу:\nID: {task[0]}\nЗадача: {task[1]}\nДедлайн: {task[2] if task[2] else 'не указан'}\n\nЧто хотите изменить?", reply_markup=keyboard)
+
+    formatted_current_deadline_display = format_deadline(task[2])
+    deadline_display = f"Срок выполнения: {formatted_current_deadline_display}" if formatted_current_deadline_display else "Срок выполнения: не указан"
+
+    await message.answer(
+        f"Вы выбрали задачу:\nНомер: {task[0]}\nЗадача: {task[1]}\n{deadline_display}\n\nЧто хотите изменить?",
+        reply_markup=keyboard)
     await state.set_state(EditTask.waiting_for_new_data)
 
-@task_router.message(EditTask.waiting_for_new_data, F.text.in_({"Описание", "Дедлайн", "Отмена"}))
+
+@task_router.message(EditTask.waiting_for_new_data, F.text.in_({"Описание", "Срок выполнения", "Отмена"}))
 async def process_edit_field_selection(message: types.Message, state: FSMContext):
     if message.text == "Отмена":
         await message.answer("Редактирование отменено.", reply_markup=types.ReplyKeyboardRemove())
@@ -201,9 +247,12 @@ async def process_edit_field_selection(message: types.Message, state: FSMContext
     if message.text == "Описание":
         await message.answer("Введите новое описание задачи:", reply_markup=types.ReplyKeyboardRemove())
         await state.set_state(EditTask.waiting_for_new_description)
-    elif message.text == "Дедлайн":
-        await message.answer("Введите новый дедлайн в формате ГГГГ-ММ-ДД ЧЧ:ММ (например, 2025-12-31 18:00). Если дедлайн не нужен, напишите 'нет'.", reply_markup=types.ReplyKeyboardRemove())
+    elif message.text == "Срок выполнения":
+        # Отправляем календарь для выбора нового дедлайна
+        await message.answer("Выберите новый срок выполнения с помощью календаря:",
+                             reply_markup=await simple_calendar.start_calendar())
         await state.set_state(EditTask.waiting_for_new_deadline)
+
 
 @task_router.message(EditTask.waiting_for_new_description)
 async def process_new_description(message: types.Message, state: FSMContext):
@@ -223,38 +272,43 @@ async def process_new_description(message: types.Message, state: FSMContext):
     conn.close()
 
     if cursor.rowcount > 0:
-        await message.answer(f"Описание задачи (ID: {task_id}) обновлено на: '{new_description}'")
+        await message.answer(f"Описание задачи (Номер: {task_id}) обновлено на: '{new_description}'")
     else:
         await message.answer("Не удалось обновить задачу. Возможно, задача не найдена или не принадлежит вам.")
     await state.clear()
 
-@task_router.message(EditTask.waiting_for_new_deadline)
-async def process_new_deadline(message: types.Message, state: FSMContext):
-    data = await state.get_data()
-    task_id = data['editing_task_id']
-    new_deadline = message.text.strip()
 
-    if new_deadline.lower() == 'нет':
-        new_deadline = None
+# Обработчик выбора даты из календаря для редактирования задачи
+@task_router.callback_query(SimpleCalendarCallback.filter(), EditTask.waiting_for_new_deadline)
+async def process_edit_deadline_calendar(callback_query: types.CallbackQuery, callback_data: SimpleCalendarCallback,
+                                         state: FSMContext):
+    selected, date = await simple_calendar.process_selection(callback_query, callback_data)
+    if selected:
+        data = await state.get_data()
+        task_id = data['editing_task_id']
+        user_id = callback_query.from_user.id
+        deadline_str = f"{date.strftime('%Y-%m-%d')}"
+
+        conn = sqlite3.connect(DATABASE_NAME)
+        cursor = conn.cursor()
+        cursor.execute("UPDATE tasks SET deadline = ? WHERE id = ? AND user_id = ?",
+                       (deadline_str, task_id, user_id))
+        conn.commit()
+        conn.close()
+
+        if cursor.rowcount > 0:
+            formatted_deadline_display = format_deadline(deadline_str)
+            await callback_query.message.edit_text(
+                f"Срок выполнения задачи (Номер: {task_id}) обновлен на: '{formatted_deadline_display}'")
+        else:
+            await callback_query.message.edit_text(
+                "Не удалось обновить задачу. Возможно, задача не найдена или не принадлежит вам.")
+        await state.clear()
+        await callback_query.answer()
     else:
-        try:
-            datetime.strptime(new_deadline, '%Y-%m-%d %H:%M')
-        except ValueError:
-            await message.answer("Неверный формат даты/времени. Пожалуйста, используйте ГГГГ-ММ-ДД ЧЧ:ММ или напишите 'нет'.")
-            return
+        # Продолжаем ждать выбор даты, если пользователь не выбрал
+        await callback_query.answer()
 
-    conn = sqlite3.connect(DATABASE_NAME)
-    cursor = conn.cursor()
-    cursor.execute("UPDATE tasks SET deadline = ? WHERE id = ? AND user_id = ?",
-                   (new_deadline, task_id, message.from_user.id))
-    conn.commit()
-    conn.close()
-
-    if cursor.rowcount > 0:
-        await message.answer(f"Дедлайн задачи (ID: {task_id}) обновлен на: '{new_deadline if new_deadline else 'не указан'}'")
-    else:
-        await message.answer("Не удалось обновить задачу. Возможно, задача не найдена или не принадлежит вам.")
-    await state.clear()
 
 # Обработчики удаления задачи
 @task_router.message(Command("delete_task"))
@@ -271,14 +325,16 @@ async def cmd_delete_task(message: types.Message, state: FSMContext):
         await state.clear()
         return
 
-    response = "Выберите задачу для удаления, указав её ID:\n\n"
+    response = "Выберите задачу для удаления, указав её номер:\n\n"
     for task_id, description, deadline in tasks:
-        deadline_str = f" (Дедлайн: {deadline})" if deadline else ""
-        response += f"ID: {task_id}\n   Задача: {description}{deadline_str}\n"
-    response += "\nВведите ID задачи, которую хотите удалить."
+        formatted_deadline = format_deadline(deadline)
+        deadline_str = f" (Срок выполнения: {formatted_deadline})" if formatted_deadline else ""
+        response += f"Номер: {task_id}\n   Задача: {description}{deadline_str}\n"
+    response += "\nВведите номер задачи, которую хотите удалить."
 
     await message.answer(response)
     await state.set_state(DeleteTask.waiting_for_task_id)
+
 
 @task_router.message(DeleteTask.waiting_for_task_id)
 async def process_delete_task_id(message: types.Message, state: FSMContext):
@@ -296,7 +352,7 @@ async def process_delete_task_id(message: types.Message, state: FSMContext):
     conn.close()
 
     if not task:
-        await message.answer("Задача с таким ID не найдена или не принадлежит вам. Пожалуйста, введите корректный ID.")
+        await message.answer("Задача с таким номером не найдена или не принадлежит вам. Пожалуйста, введите корректный номер.")
         return
 
     await state.update_data(deleting_task_id=task_id, deleting_task_desc=task[1])
@@ -308,8 +364,10 @@ async def process_delete_task_id(message: types.Message, state: FSMContext):
         resize_keyboard=True,
         one_time_keyboard=True
     )
-    await message.answer(f"Вы уверены, что хотите удалить задачу (ID: {task[0]}): '{task[1]}'? (Да/Нет)", reply_markup=keyboard)
+    await message.answer(f"Вы уверены, что хотите удалить задачу (Номер: {task[0]}): '{task[1]}'? (Да/Нет)",
+                         reply_markup=keyboard)
     await state.set_state(DeleteTask.waiting_for_confirmation)
+
 
 @task_router.message(DeleteTask.waiting_for_confirmation, F.text.in_({"Да", "Нет"}))
 async def process_delete_confirmation(message: types.Message, state: FSMContext):
@@ -326,12 +384,15 @@ async def process_delete_confirmation(message: types.Message, state: FSMContext)
         conn.close()
 
         if cursor.rowcount > 0:
-            await message.answer(f"Задача '{task_description}' (ID: {task_id}) успешно удалена.", reply_markup=types.ReplyKeyboardRemove())
+            await message.answer(f"Задача '{task_description}' (Номер: {task_id}) успешно удалена.",
+                                 reply_markup=types.ReplyKeyboardRemove())
         else:
-            await message.answer("Не удалось удалить задачу. Возможно, задача уже была удалена или не принадлежит вам.", reply_markup=types.ReplyKeyboardRemove())
+            await message.answer("Не удалось удалить задачу. Возможно, задача уже была удалена или не принадлежит вам.",
+                                 reply_markup=types.ReplyKeyboardRemove())
     else:
         await message.answer("Удаление отменено.", reply_markup=types.ReplyKeyboardRemove())
     await state.clear()
+
 
 # Главная функция запуска бота
 async def main():
@@ -339,6 +400,7 @@ async def main():
     dp.include_router(welcome_router)
     dp.include_router(task_router)
     await dp.start_polling(bot)
+
 
 if __name__ == "__main__":
     print("Бот запускается... Нажмите Ctrl+C для остановки.")
@@ -348,4 +410,3 @@ if __name__ == "__main__":
         print("Бот остановлен.")
     except Exception as e:
         print(f"Произошла ошибка: {e}")
-
