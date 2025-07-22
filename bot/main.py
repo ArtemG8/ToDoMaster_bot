@@ -1,6 +1,9 @@
 import asyncio
 import logging
 import sqlite3
+from dotenv import load_dotenv
+import os
+load_dotenv()
 from datetime import datetime, timedelta
 
 from aiogram import Bot, Dispatcher, types, Router, F
@@ -16,7 +19,6 @@ from aiogram_calendar import SimpleCalendar, SimpleCalendarCallback
 simple_calendar = SimpleCalendar()
 
 # Конфигурация
-TOKEN = "7860468847:AAG1fHL18lU0Rpnq6ey81vv1vWLRWg7frbQ"
 DATABASE_NAME = 'todo.db'
 welcome_text = """
 Привет! Я твой личный ToDo бот!👋
@@ -37,7 +39,7 @@ welcome_text = """
 """
 
 # Инициализация бота и диспетчера
-bot = Bot(token=TOKEN)
+bot = Bot(os.getenv("TOKEN"))
 dp = Dispatcher()
 
 # Включаем логирование
