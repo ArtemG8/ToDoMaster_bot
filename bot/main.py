@@ -9,7 +9,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from aiogram.filters.callback_data import CallbackData
-import aiogram.exceptions # Import exceptions
+import aiogram.exceptions
 
 from aiogram_calendar import SimpleCalendar, SimpleCalendarCallback
 
@@ -18,6 +18,23 @@ simple_calendar = SimpleCalendar()
 # Конфигурация
 TOKEN = "7860468847:AAG1fHL18lU0Rpnq6ey81vv1vWLRWg7frbQ"
 DATABASE_NAME = 'todo.db'
+welcome_text = """
+Привет! Я твой личный ToDo бот!👋
+
+Я создан, чтобы помочь тебе эффективно управлять своими задачами и значительно повысить твою продуктивность. Со мной ты сможешь легко:
+
+   ✍ Записывать все свои дела — от самых мелких заметок до крупных проектов.
+   ⏰ Устанавливать сроки выполнения для каждой задачи, чтобы ничего не упустить.
+   🔔 Настраивать таймеры и напоминания, чтобы вовремя приступать к работе и успевать в срок.
+
+Забудь о забытых задачах и невыполненных планах!
+Начнем прямо сейчас?
+
+Для добавления задачи используй /add_task
+Для просмотра задач используй /list_tasks
+Для редактирования задачи используй /edit_task
+Для удаления задачи используй /delete_task
+"""
 
 # Инициализация бота и диспетчера
 bot = Bot(token=TOKEN)
@@ -121,7 +138,6 @@ class DeleteTask(StatesGroup):
     waiting_for_confirmation = State()
 
 
-# НОВОЕ СОСТОЯНИЕ ДЛЯ ЗАВЕРШЕНИЯ ЗАДАЧИ
 class CompleteTask(StatesGroup):
     waiting_for_task_number = State()
 
@@ -130,130 +146,98 @@ class CompleteTask(StatesGroup):
 welcome_router = Router()
 task_router = Router()
 
+# --- НОВЫЕ CALLBACKDATA И КОНСТАНТЫ ДЛЯ ЗАВЕРШЕНИЯ ЗАДАЧ ---
 
-# Обработчик команды /start
-@welcome_router.message(Command("start"))
-async def start_command(message: types.Message):
-    welcome_text = """
-Привет! Я твой личный ToDo бот!👋
-
-Я создан, чтобы помочь тебе эффективно управлять своими задачами и значительно повысить твою продуктивность. Со мной ты сможешь легко:
-
-   ✍ Записывать все свои дела — от самых мелких заметок до крупных проектов.
-   ⏰ Устанавливать сроки выполнения для каждой задачи, чтобы ничего не упустить.
-   🔔 Настраивать таймеры и напоминания, чтобы вовремя приступать к работе и успевать в срок.
-
-Забудь о забытых задачах и невыполненных планах!
-Начнем прямо сейчас?
-
-Для добавления задачи используй /add_task
-Для просмотра задач используй /list_tasks
-Для редактирования задачи используй /edit_task
-Для удаления задачи используй /delete_task
-"""
-    await message.answer(welcome_text)
+PAGE_SIZE = 5  # Кол-во задач на странице для пагинации
 
 
-# Обработчики добавления задачи
-@task_router.message(Command("add_task"))
-async def cmd_add_task(message: types.Message, state: FSMContext):
-    await message.answer("Отлично! Что нужно сделать? Опишите задачу.", reply_markup=types.ReplyKeyboardRemove())
-    await state.set_state(AddTask.waiting_for_description)
-
-
-@task_router.message(AddTask.waiting_for_description)
-async def process_description(message: types.Message, state: FSMContext):
-    if not message.text:
-        await message.answer("Пожалуйста, введите описание задачи текстом.")
-        return
-    await state.update_data(description=message.text)
-    await message.answer("Теперь выберите срок выполнения (дедлайн) с помощью календаря:",
-                         reply_markup=await simple_calendar.start_calendar())
-    await state.set_state(AddTask.waiting_for_deadline)
-
-
-# Обработчик выбора даты из календаря для добавления задачи
-@task_router.callback_query(SimpleCalendarCallback.filter(), AddTask.waiting_for_deadline)
-async def process_add_deadline_calendar(callback_query: types.CallbackQuery, callback_data: SimpleCalendarCallback,
-                                        state: FSMContext):
-    selected, date = await simple_calendar.process_selection(callback_query, callback_data)
-    if selected:
-        user_id = callback_query.from_user.id
-        data = await state.get_data()
-        description = data['description']
-        deadline_str = f"{date.strftime('%Y-%m-%d')}"
-
-        conn = sqlite3.connect(DATABASE_NAME)
-        cursor = conn.cursor()
-
-        cursor.execute("SELECT MAX(task_number) FROM tasks WHERE user_id = ?", (user_id,))
-        max_task_number = cursor.fetchone()[0]
-        new_task_number = (max_task_number or 0) + 1
-
-        # Добавляем статус 'active' при вставке новой задачи
-        cursor.execute("INSERT INTO tasks (user_id, task_number, description, deadline, status) VALUES (?, ?, ?, ?, ?)",
-                       (user_id, new_task_number, description, deadline_str, 'active'))
-        conn.commit()
-        conn.close()
-
-
-        formatted_deadline_display = format_deadline(deadline_str)
-        await callback_query.message.edit_text(
-            f"Задача '{description}' (Номер: {new_task_number}) со сроком выполнения '{formatted_deadline_display}' добавлена!\nХотите ещё? /add_task \nПосмотреть все задачи: /list_tasks")
-        await state.clear()
-        await callback_query.answer()
-    else:
-        await callback_query.answer()
-
-
-# --- ОБНОВЛЕННЫЙ ФУНКЦИОНАЛ ПРОСМОТРА ЗАДАЧ И ЗАВЕРШЕНИЯ ---
-
-# Класс для обработки CallbackData от инлайн-кнопок фильтрации задач
 class TaskListFilterCallback(CallbackData, prefix="task_filter"):
-    filter: str  # 'today', 'week', 'month', 'all', 'history_all'
+    filter_type: str  # 'today', 'week', 'month', 'all', 'history_all'
 
 
-# Класс для обработки CallbackData от кнопок действий
 class TaskActionCallback(CallbackData, prefix="task_action"):
-    action: str  # 'complete_task'
+    action: str  # например, 'complete_task_today', 'complete_task_week' и т.д.
 
 
-# Функция для создания инлайн-клавиатуры с кнопками фильтрации и завершения
+class CompleteTaskCallback(CallbackData, prefix="complete_task"):
+    filter_type: str  # 'today', 'week', 'month', 'all'
+    page: int = 0  # страница отображения при пагинации
+    task_number: int | None = None  # номер задачи для завершения (None — просто просмотр списка)
+
+
+# Главная клавиатура с кнопками фильтров и кнопкой "Завершить задачу"
 def get_task_list_keyboard(current_filter: str = None):
     builder = InlineKeyboardBuilder()
     builder.add(types.InlineKeyboardButton(
         text="Задачи на сегодня",
-        callback_data=TaskListFilterCallback(filter="today").pack()
+        callback_data=TaskListFilterCallback(filter_type="today").pack()
     ))
     builder.add(types.InlineKeyboardButton(
         text="На неделю",
-        callback_data=TaskListFilterCallback(filter="week").pack()
+        callback_data=TaskListFilterCallback(filter_type="week").pack()
     ))
     builder.add(types.InlineKeyboardButton(
         text="На месяц",
-        callback_data=TaskListFilterCallback(filter="month").pack()
+        callback_data=TaskListFilterCallback(filter_type="month").pack()
     ))
     builder.add(types.InlineKeyboardButton(
         text="Посмотреть все",
-        callback_data=TaskListFilterCallback(filter="all").pack()
+        callback_data=TaskListFilterCallback(filter_type="all").pack()
     ))
-    # Добавляем кнопку "Завершить задачу" только для активных задач
     if current_filter != "history_all":
+        # Кнопка завершения задачи с передачей текущего фильтра (по умолчанию all)
         builder.add(types.InlineKeyboardButton(
             text="Завершить задачу",
-            callback_data=TaskActionCallback(action="complete_task").pack()
+            callback_data=TaskActionCallback(action="complete_task_" + (current_filter or "all")).pack()
         ))
     builder.add(types.InlineKeyboardButton(
         text="История задач",
-        callback_data=TaskListFilterCallback(filter="history_all").pack()
+        callback_data=TaskListFilterCallback(filter_type="history_all").pack()
     ))
     builder.adjust(2)
     return builder.as_markup()
 
 
-# Вспомогательная функция для получения и отправки списка задач
-async def send_task_list(target_message_or_query: types.Message | types.CallbackQuery, user_id: int,
-                         task_limit: int = None, filter_type: str = None, status_filter: str = 'active'):
+# Формируем клавиатуру с номерами задач для завершения (с пагинацией)
+def build_complete_task_keyboard(tasks, filter_type, page=0):
+    builder = InlineKeyboardBuilder()
+    start = page * PAGE_SIZE
+    end = start + PAGE_SIZE
+    page_tasks = tasks[start:end]
+
+    for task_number, description, deadline in page_tasks:
+        formatted_deadline = format_deadline(deadline)
+        deadline_str = f" ✅({formatted_deadline})" if formatted_deadline else ""
+        button_text = f"{task_number}{deadline_str}"
+
+        builder.row(types.InlineKeyboardButton(
+            text=button_text,
+            callback_data=CompleteTaskCallback(filter_type=filter_type, page=page, task_number=task_number).pack()
+        ))
+
+    nav_buttons = []
+    if page > 0:
+        nav_buttons.append(types.InlineKeyboardButton(
+            text="⬅️ Назад",
+            callback_data=CompleteTaskCallback(filter_type=filter_type, page=page - 1).pack()
+        ))
+    if end < len(tasks):
+        nav_buttons.append(types.InlineKeyboardButton(
+            text="Вперед ➡️",
+            callback_data=CompleteTaskCallback(filter_type=filter_type, page=page + 1).pack()
+        ))
+    if nav_buttons:
+        builder.row(*nav_buttons)
+
+    builder.row(types.InlineKeyboardButton(
+        text="❌ Отменить завершение",
+        callback_data="cancel_complete"
+    ))
+    return builder.as_markup()
+
+
+# Вспомогательная функция получения задач с фильтром и статусом
+def get_tasks_for_user(user_id: int, filter_type: str, status_filter: str = 'active'):
     conn = sqlite3.connect(DATABASE_NAME)
     cursor = conn.cursor()
 
@@ -275,12 +259,16 @@ async def send_task_list(target_message_or_query: types.Message | types.Callback
         params.append(current_date.strftime('%Y-%m-%d'))
 
     query += " ORDER BY task_number"
-    if task_limit:
-        query += f" LIMIT {task_limit}"
-
     cursor.execute(query, tuple(params))
     tasks = cursor.fetchall()
     conn.close()
+    return tasks
+
+
+# Вспомогательная функция для получения и отправки списка задач (при обычном просмотре)
+async def send_task_list(target_message_or_query: types.Message | types.CallbackQuery, user_id: int,
+                         task_limit: int = None, filter_type: str = None, status_filter: str = 'active'):
+    tasks = get_tasks_for_user(user_id, filter_type=filter_type or "all", status_filter=status_filter)
 
     response = ""
     if not tasks:
@@ -293,7 +281,7 @@ async def send_task_list(target_message_or_query: types.Message | types.Callback
                 response = "У вас нет активных задач на текущий месяц."
             else:
                 response = "У вас пока нет активных задач."
-        else:  # status_filter == 'completed'
+        else:
             response = "У вас пока нет завершенных задач."
     else:
         response_header = ""
@@ -306,67 +294,130 @@ async def send_task_list(target_message_or_query: types.Message | types.Callback
                 response_header = "🗓 Ваши активные задачи на текущий месяц:\n\n"
             elif task_limit:
                 response_header = "Ваши первые 5 активных задач:\n\n"
-            else:
+            elif filter_type == "all":
                 response_header = "Ваши все активные задачи:\n\n"
-        else:  # status_filter == 'completed'
+        else:
             response_header = "Ваши завершенные задачи:\n\n"
 
         response = response_header
-        for task_number, description, deadline in tasks:
+        selected_tasks = tasks if not task_limit else tasks[:task_limit]
+        for task_number, description, deadline in selected_tasks:
             formatted_deadline = format_deadline(deadline)
             deadline_str = f" (Срок выполнения: {formatted_deadline})" if formatted_deadline else ""
             response += f"Номер: {task_number}.\n   Задача: {description}{deadline_str}\n"
 
-    keyboard = get_task_list_keyboard(filter_type)  # Передаем текущий фильтр для определения кнопок
+    keyboard = get_task_list_keyboard(filter_type)  # Передаем текущий фильтр
 
     if isinstance(target_message_or_query, types.Message):
         await target_message_or_query.answer(response, reply_markup=keyboard)
     elif isinstance(target_message_or_query, types.CallbackQuery):
-       #исключение ошибки при повторном нажатии кнопки
-        current_text = target_message_or_query.message.text
+        current_text = target_message_or_query.message.text or ""
         current_reply_markup = target_message_or_query.message.reply_markup
 
-        # Helper to get a comparable representation of the keyboard
         def get_keyboard_data(markup: types.InlineKeyboardMarkup):
             if not markup:
                 return None
-            # Convert each button to its dictionary representation for robust comparison
             return [[button.model_dump() for button in row] for row in markup.inline_keyboard]
 
         new_keyboard_data = get_keyboard_data(keyboard)
         current_keyboard_data = get_keyboard_data(current_reply_markup)
 
-        # Only edit the message if content or markup has changed
         if response == current_text and new_keyboard_data == current_keyboard_data:
             logging.info("Skipping message edit: content and markup are identical.")
-            # No need to edit, just answer the callback query later
         else:
-            # Try to edit the message and catch the specific BadRequest if it still occurs
             try:
                 await target_message_or_query.message.edit_text(
                     text=response,
                     reply_markup=keyboard
                 )
             except aiogram.exceptions.TelegramBadRequest as e:
-                # Log if it's the "message is not modified" error, otherwise re-raise
                 if "message is not modified" in str(e):
-                    logging.info("Caught TelegramBadRequest: message not modified. Ignoring as intended.")
+                    logging.info("Caught TelegramBadRequest: message not modified. Ignoring.")
                 else:
-                    raise e # Re-raise other unexpected errors
+                    raise e
+
+
+# Обработчик команды /start
+@welcome_router.message(Command("start"))
+async def start_command(message: types.Message):
+
+    await message.answer(welcome_text)
+
+
+# Обработчики добавления задачи
+@task_router.message(Command("add_task"))
+async def cmd_add_task(message: types.Message, state: FSMContext):
+    builder = InlineKeyboardBuilder()
+    builder.add(types.InlineKeyboardButton(text="🔙 Отмена", callback_data="cancel_add_task"))
+    await message.answer("Отлично! Что нужно сделать? Опишите задачу.", reply_markup=builder.as_markup())
+    await state.set_state(AddTask.waiting_for_description)
+
+# Обработчик inline кнопки отмены при добавлении задачи
+@task_router.callback_query(F.data == "cancel_add_task")
+async def process_cancel_add_task(callback_query: types.CallbackQuery, state: FSMContext):
+    await state.clear()
+    # Изменяем сообщение, на котором была нажата кнопка
+    await callback_query.answer("Добавление задачи отменено", show_alert=False)
+
+
+    # Отправляем сообщение главного меню
+    await callback_query.message.answer(welcome_text)
+    await callback_query.answer()  # Отвечаем на callback-запрос, чтобы убрать "часики"
+
+@task_router.message(AddTask.waiting_for_description)
+async def process_description(message: types.Message, state: FSMContext):
+    if not message.text:
+        await message.answer("Пожалуйста, введите описание задачи текстом.")
+        return
+    await state.update_data(description=message.text)
+    await message.answer("Теперь выберите срок выполнения (дедлайн) с помощью календаря:",
+                         reply_markup=await simple_calendar.start_calendar())
+    await state.set_state(AddTask.waiting_for_deadline)
+
+
+@task_router.callback_query(SimpleCalendarCallback.filter(), AddTask.waiting_for_deadline)
+async def process_add_deadline_calendar(callback_query: types.CallbackQuery, callback_data: SimpleCalendarCallback,
+                                        state: FSMContext):
+    selected, date = await simple_calendar.process_selection(callback_query, callback_data)
+    if selected:
+        user_id = callback_query.from_user.id
+        data = await state.get_data()
+        description = data['description']
+        deadline_str = f"{date.strftime('%Y-%m-%d')}"
+
+        conn = sqlite3.connect(DATABASE_NAME)
+        cursor = conn.cursor()
+
+        cursor.execute("SELECT MAX(task_number) FROM tasks WHERE user_id = ?", (user_id,))
+        max_task_number = cursor.fetchone()[0]
+        new_task_number = (max_task_number or 0) + 1
+
+        cursor.execute("INSERT INTO tasks (user_id, task_number, description, deadline, status) VALUES (?, ?, ?, ?, ?)",
+                       (user_id, new_task_number, description, deadline_str, 'active'))
+        conn.commit()
+        conn.close()
+
+        formatted_deadline_display = format_deadline(deadline_str)
+        await callback_query.message.edit_text(
+            f"Задача '{description}' (Номер: {new_task_number}) со сроком выполнения '{formatted_deadline_display}' добавлена!\n"
+            f"Хотите ещё? /add_task \nПосмотреть все задачи: /list_tasks")
+        await state.clear()
+        await callback_query.answer()
+    else:
+        await callback_query.answer()
 
 
 # Обработчик команды /list_tasks
 @task_router.message(Command("list_tasks"))
 async def cmd_list_tasks(message: types.Message):
     user_id = message.from_user.id
-    await send_task_list(message, user_id, task_limit=5, status_filter='active')
+    await send_task_list(message, user_id, task_limit=5, status_filter='active', filter_type="all")
 
 
 # Обработчик команды /history_tasks
 @task_router.message(Command("history_tasks"))
 async def cmd_history_tasks(message: types.Message):
     user_id = message.from_user.id
-    # Отправляем все завершенные задачи
     await send_task_list(message, user_id, filter_type="history_all", status_filter='completed')
 
 
@@ -374,93 +425,116 @@ async def cmd_history_tasks(message: types.Message):
 @task_router.callback_query(TaskListFilterCallback.filter())
 async def process_task_list_filter_callback(callback_query: types.CallbackQuery, callback_data: TaskListFilterCallback):
     user_id = callback_query.from_user.id
-    filter_type = callback_data.filter
+    filter_type = callback_data.filter_type
 
     status_filter = 'active'
     if filter_type == "history_all":
         status_filter = 'completed'
 
     await send_task_list(callback_query, user_id, filter_type=filter_type, status_filter=status_filter)
-    if status_filter == 'today':
-        await callback_query.answer(text='Задача на сегодня', show_alert=True)
+
+    #Уведомление при фильтрах
+    if filter_type == "today":
+        await callback_query.answer("Ваши задачи на сегодня", show_alert=False)
+    elif filter_type == "week":
+        await callback_query.answer("Ваши задачи на неделю", show_alert=False)
+    elif filter_type == "month":
+        await callback_query.answer("Ваши задачи на месяц", show_alert=False)
+    elif filter_type == "all":
+        await callback_query.answer("Все ваши задачи", show_alert=False)
     else:
         await callback_query.answer()
 
 
-# ОБРАБОТЧИК: Нажатие кнопки "Завершить задачу"
-@task_router.callback_query(TaskActionCallback.filter())  # Исправлено: без аргумента action здесь
+# Обработчик нажатия "Завершить задачу" с фильтром в callback
+@task_router.callback_query(TaskActionCallback.filter())
 async def process_complete_task_action(callback_query: types.CallbackQuery, callback_data: TaskActionCallback,
                                        state: FSMContext):
-    if callback_data.action == "complete_task":  # Проверяем action внутри обработчика
+    action = callback_data.action
+    if action.startswith("complete_task"):
+        parts = action.split("_", 2)
+        filter_type = parts[2] if len(parts) > 2 else "all"
         user_id = callback_query.from_user.id
 
-        conn = sqlite3.connect(DATABASE_NAME)
-        cursor = conn.cursor()
-        cursor.execute(
-            "SELECT task_number, description, deadline FROM tasks WHERE user_id = ? AND status = 'active' ORDER BY task_number",
-            (user_id,))
-        tasks = cursor.fetchall()
-        conn.close()
+        tasks = get_tasks_for_user(user_id, filter_type=filter_type, status_filter='active')
 
         if not tasks:
-            await callback_query.message.answer("У вас нет активных задач для завершения.")
-            await callback_query.answer()
+            await callback_query.answer("У вас нет активных задач для завершения.", show_alert=True)
             return
 
-        response = "Выберите задачу для завершения, указав её номер:\n\n"
-        for task_number, description, deadline in tasks:
-            formatted_deadline = format_deadline(deadline)
-            deadline_str = f" (Срок выполнения: {formatted_deadline})" if formatted_deadline else ""
-            response += f"Номер: {task_number}\n   Задача: {description}{deadline_str}\n"
-        response += "\nВведите номер задачи, которую хотите завершить."
+        # Вместо изменения текста сообщения, просто меняем клавиатуру на кнопку выбора задач для завершения
+        keyboard = build_complete_task_keyboard(tasks, filter_type, page=0)
 
-        await callback_query.message.answer(response, reply_markup=types.ReplyKeyboardRemove())
-        await state.set_state(CompleteTask.waiting_for_task_number)
+        # Обновляем реквизиты — оставляем текст без изменений, меняем только клавиатуру
+        try:
+            await callback_query.message.edit_reply_markup(reply_markup=keyboard)
+        except aiogram.exceptions.TelegramBadRequest as e:
+            # Если клавиатура такая же, игнорируем
+            if "message is not modified" not in str(e):
+                raise e
+
         await callback_query.answer()
     else:
         await callback_query.answer("Неизвестное действие.")
 
 
-# ОБРАБОТЧИК: Получение номера задачи для завершения
-@task_router.message(CompleteTask.waiting_for_task_number)
-async def process_complete_task_number(message: types.Message, state: FSMContext):
+# Обработчик callback для завершения задачи / пагинации / отмены завершения
+@task_router.callback_query(lambda c: c.data and (c.data.startswith("complete_task") or c.data == "cancel_complete"))
+async def process_complete_task_callback(callback_query: types.CallbackQuery, state: FSMContext):
+    data = callback_query.data
+    user_id = callback_query.from_user.id
+
+    if data == "cancel_complete":
+        # При отмене показываем исходный список задач с фильтром, не сообщение "Отменено завершение"
+        # Чтобы сохранить текущий фильтр, определим его по клавиатуре или по дефолту
+        # Но проще сохранить фильтр в data (это можно усложнить), пока вернем дефолт all
+        # Если хотите, можно попробовать парсить callback_query.message.reply_markup, но проще универсально:
+        # Покажем все активные задачи (filter_type='all')
+        await send_task_list(callback_query.message, user_id, filter_type="all", status_filter='active')
+        await callback_query.answer("Завершение задачи отменено.")
+        return
+
     try:
-        user_provided_task_number = int(message.text)
-    except ValueError:
-        await message.answer("Пожалуйста, введите корректный числовой номер задачи.")
+        cb = CompleteTaskCallback.unpack(data)
+    except Exception:
+        await callback_query.answer("Ошибка. Попробуйте снова.", show_alert=True)
         return
 
-    user_id = message.from_user.id
-    conn = sqlite3.connect(DATABASE_NAME)
-    cursor = conn.cursor()
+    filter_type = cb.filter_type
+    page = cb.page
+    selected_task_number = cb.task_number
 
-    cursor.execute("SELECT description FROM tasks WHERE user_id = ? AND task_number = ? AND status = 'active'",
-                   (user_id, user_provided_task_number))
-    task_info = cursor.fetchone()
+    tasks = get_tasks_for_user(user_id, filter_type=filter_type, status_filter='active')
 
-    if not task_info:
-        await message.answer(
-            "Активная задача с таким номером не найдена или не принадлежит вам. Пожалуйста, введите корректный номер.")
+    if selected_task_number is not None:
+        # Пользователь выбрал задачу для завершения
+        conn = sqlite3.connect(DATABASE_NAME)
+        cursor = conn.cursor()
+        cursor.execute("SELECT description FROM tasks WHERE user_id = ? AND task_number = ? AND status = 'active'",
+                       (user_id, selected_task_number))
+        task_info = cursor.fetchone()
+        if not task_info:
+            await callback_query.answer("Задача не найдена или уже завершена.", show_alert=True)
+            conn.close()
+            return
+        task_description = task_info[0]
+
+        cursor.execute("UPDATE tasks SET status = 'completed' WHERE user_id = ? AND task_number = ? AND status = 'active'",
+                       (user_id, selected_task_number))
+        conn.commit()
         conn.close()
-        return
 
-    task_description = task_info[0]
-
-    # Обновляем статус задачи на 'completed' вместо удаления
-    cursor.execute("UPDATE tasks SET status = 'completed' WHERE user_id = ? AND task_number = ? AND status = 'active'",
-                   (user_id, user_provided_task_number))
-    conn.commit()
-
-    if cursor.rowcount > 0:
-        await message.answer(
-            f"Задача '{task_description}' (Номер: {user_provided_task_number}) успешно завершена и перемещена в историю.")
-        await send_task_list(message, user_id, task_limit=5,
-                             status_filter='active')  # Показываем обновленный список активных задач
+        if cursor.rowcount > 0:
+            # Обновляем и показываем оригинальный список задач с кнопками
+            await send_task_list(callback_query.message, user_id, filter_type=filter_type, status_filter='active')
+            await callback_query.answer(f"Задача '{task_description}' (Номер: {selected_task_number}) завершена.")
+        else:
+            await callback_query.answer("Не удалось завершить задачу.", show_alert=True)
     else:
-        await message.answer("Не удалось завершить задачу. Возможно, задача уже была завершена или не найдена.")
-
-    conn.close()
-    await state.clear()
+        # Переход по страницам пагинации
+        keyboard = build_complete_task_keyboard(tasks, filter_type, page=page)
+        await callback_query.message.edit_reply_markup(reply_markup=keyboard)
+        await callback_query.answer()
 
 
 #  Обработчики редактирования задачи
@@ -469,7 +543,6 @@ async def cmd_edit_task(message: types.Message, state: FSMContext):
     user_id = message.from_user.id
     conn = sqlite3.connect(DATABASE_NAME)
     cursor = conn.cursor()
-    # Выбираем только активные задачи для редактирования
     cursor.execute(
         "SELECT task_number, description, deadline FROM tasks WHERE user_id = ? AND status = 'active' ORDER BY task_number",
         (user_id,))
@@ -503,7 +576,6 @@ async def process_edit_task_number(message: types.Message, state: FSMContext):
     user_id = message.from_user.id
     conn = sqlite3.connect(DATABASE_NAME)
     cursor = conn.cursor()
-    # Ищем активную задачу по user_id и user_provided_task_number
     cursor.execute(
         "SELECT id, task_number, description, deadline FROM tasks WHERE user_id = ? AND task_number = ? AND status = 'active'",
         (user_id, user_provided_task_number))
@@ -512,7 +584,7 @@ async def process_edit_task_number(message: types.Message, state: FSMContext):
 
     if not task:
         await message.answer(
-            "Активная задача с таким номером не найдена или не принадлежит вам. Пожалуйста, введите корректный номер.")
+            "Активная задача с таким номером не найдена. Пожалуйста, введите корректный номер.")
         return
 
     internal_db_id = task[0]
@@ -566,7 +638,6 @@ async def process_new_description(message: types.Message, state: FSMContext):
 
     conn = sqlite3.connect(DATABASE_NAME)
     cursor = conn.cursor()
-    # Обновляем описание только для активных задач
     cursor.execute("UPDATE tasks SET description = ? WHERE id = ? AND user_id = ? AND status = 'active'",
                    (new_description, internal_db_id, message.from_user.id))
     conn.commit()
@@ -593,7 +664,6 @@ async def process_edit_deadline_calendar(callback_query: types.CallbackQuery, ca
 
         conn = sqlite3.connect(DATABASE_NAME)
         cursor = conn.cursor()
-        # Обновляем дедлайн только для активных задач
         cursor.execute("UPDATE tasks SET deadline = ? WHERE id = ? AND user_id = ? AND status = 'active'",
                        (deadline_str, internal_db_id, user_id))
         conn.commit()
@@ -618,7 +688,6 @@ async def cmd_delete_task(message: types.Message, state: FSMContext):
     user_id = message.from_user.id
     conn = sqlite3.connect(DATABASE_NAME)
     cursor = conn.cursor()
-    # Выбираем только активные задачи для удаления
     cursor.execute(
         "SELECT task_number, description, deadline FROM tasks WHERE user_id = ? AND status = 'active' ORDER BY task_number",
         (user_id,))
@@ -652,7 +721,6 @@ async def process_delete_task_number(message: types.Message, state: FSMContext):
     user_id = message.from_user.id
     conn = sqlite3.connect(DATABASE_NAME)
     cursor = conn.cursor()
-    # Ищем активную задачу по user_id и user_provided_task_number
     cursor.execute(
         "SELECT id, task_number, description, deadline FROM tasks WHERE user_id = ? AND task_number = ? AND status = 'active'",
         (user_id, user_provided_task_number))
@@ -695,7 +763,6 @@ async def process_delete_confirmation(message: types.Message, state: FSMContext)
 
         conn = sqlite3.connect(DATABASE_NAME)
         cursor = conn.cursor()
-        # Удаляем только активную задачу
         cursor.execute("DELETE FROM tasks WHERE id = ? AND user_id = ? AND status = 'active'",
                        (internal_db_id, user_id))
         conn.commit()
@@ -729,4 +796,3 @@ if __name__ == "__main__":
         print("Бот остановлен.")
     except Exception as e:
         print(f"Произошла ошибка: {e}")
-
