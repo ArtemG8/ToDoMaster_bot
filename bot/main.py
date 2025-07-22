@@ -9,6 +9,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from aiogram.filters.callback_data import CallbackData
+import aiogram.exceptions # Import exceptions
 
 from aiogram_calendar import SimpleCalendar, SimpleCalendarCallback
 
@@ -195,6 +196,7 @@ async def process_add_deadline_calendar(callback_query: types.CallbackQuery, cal
         conn.commit()
         conn.close()
 
+
         formatted_deadline_display = format_deadline(deadline_str)
         await callback_query.message.edit_text(
             f"Задача '{description}' (Номер: {new_task_number}) со сроком выполнения '{formatted_deadline_display}' добавлена!\nХотите ещё? /add_task \nПосмотреть все задачи: /list_tasks")
@@ -236,7 +238,7 @@ def get_task_list_keyboard(current_filter: str = None):
         callback_data=TaskListFilterCallback(filter="all").pack()
     ))
     # Добавляем кнопку "Завершить задачу" только для активных задач
-    if current_filter != "history_all":  # Убедимся, что эта кнопка не появляется в истории
+    if current_filter != "history_all":
         builder.add(types.InlineKeyboardButton(
             text="Завершить задачу",
             callback_data=TaskActionCallback(action="complete_task").pack()
@@ -297,11 +299,11 @@ async def send_task_list(target_message_or_query: types.Message | types.Callback
         response_header = ""
         if status_filter == 'active':
             if filter_type == "today":
-                response_header = "Ваши активные задачи на сегодня:\n\n"
+                response_header = "🗓 Ваши активные задачи на сегодня:\n\n"
             elif filter_type == "week":
-                response_header = "Ваши активные задачи на текущую неделю:\n\n"
+                response_header = "🗓 Ваши активные задачи на текущую неделю:\n\n"
             elif filter_type == "month":
-                response_header = "Ваши активные задачи на текущий месяц:\n\n"
+                response_header = "🗓 Ваши активные задачи на текущий месяц:\n\n"
             elif task_limit:
                 response_header = "Ваши первые 5 активных задач:\n\n"
             else:
@@ -320,10 +322,37 @@ async def send_task_list(target_message_or_query: types.Message | types.Callback
     if isinstance(target_message_or_query, types.Message):
         await target_message_or_query.answer(response, reply_markup=keyboard)
     elif isinstance(target_message_or_query, types.CallbackQuery):
-        await target_message_or_query.message.edit_text(
-            text=response,
-            reply_markup=keyboard
-        )
+       #исключение ошибки при повторном нажатии кнопки
+        current_text = target_message_or_query.message.text
+        current_reply_markup = target_message_or_query.message.reply_markup
+
+        # Helper to get a comparable representation of the keyboard
+        def get_keyboard_data(markup: types.InlineKeyboardMarkup):
+            if not markup:
+                return None
+            # Convert each button to its dictionary representation for robust comparison
+            return [[button.model_dump() for button in row] for row in markup.inline_keyboard]
+
+        new_keyboard_data = get_keyboard_data(keyboard)
+        current_keyboard_data = get_keyboard_data(current_reply_markup)
+
+        # Only edit the message if content or markup has changed
+        if response == current_text and new_keyboard_data == current_keyboard_data:
+            logging.info("Skipping message edit: content and markup are identical.")
+            # No need to edit, just answer the callback query later
+        else:
+            # Try to edit the message and catch the specific BadRequest if it still occurs
+            try:
+                await target_message_or_query.message.edit_text(
+                    text=response,
+                    reply_markup=keyboard
+                )
+            except aiogram.exceptions.TelegramBadRequest as e:
+                # Log if it's the "message is not modified" error, otherwise re-raise
+                if "message is not modified" in str(e):
+                    logging.info("Caught TelegramBadRequest: message not modified. Ignoring as intended.")
+                else:
+                    raise e # Re-raise other unexpected errors
 
 
 # Обработчик команды /list_tasks
@@ -352,8 +381,10 @@ async def process_task_list_filter_callback(callback_query: types.CallbackQuery,
         status_filter = 'completed'
 
     await send_task_list(callback_query, user_id, filter_type=filter_type, status_filter=status_filter)
-
-    await callback_query.answer()
+    if status_filter == 'today':
+        await callback_query.answer(text='Задача на сегодня', show_alert=True)
+    else:
+        await callback_query.answer()
 
 
 # ОБРАБОТЧИК: Нажатие кнопки "Завершить задачу"
