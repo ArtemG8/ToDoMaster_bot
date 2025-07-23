@@ -296,14 +296,14 @@ async def send_task_list(target_message_or_query: types.Message | types.Callback
             elif filter_type == "month":
                 response_header = "🗓 Ваши активные задачи на текущий месяц:\n\n"
             elif task_limit:
-                response_header = "Ваши первые 5 активных задач:\n\n"
+                response_header = "Ваши последние 5 активных задач:\n\n"
             elif filter_type == "all":
                 response_header = "Ваши все активные задачи:\n\n"
         else:
             response_header = "Ваши завершенные задачи:\n\n"
 
         response = response_header
-        selected_tasks = tasks if not task_limit else tasks[:task_limit]
+        selected_tasks = tasks if not task_limit else tasks[-5::1]
         for task_number, description, deadline in selected_tasks:
             formatted_deadline = format_deadline(deadline)
             deadline_str = f" (Срок выполнения: {formatted_deadline})" if formatted_deadline else ""
@@ -414,7 +414,7 @@ async def process_add_deadline_calendar(callback_query: types.CallbackQuery, cal
 @task_router.message(Command("list_tasks"))
 async def cmd_list_tasks(message: types.Message):
     user_id = message.from_user.id
-    await send_task_list(message, user_id, task_limit=5, status_filter='active', filter_type="all")
+    await send_task_list(message, user_id, task_limit=1, status_filter='active', filter_type="all")
 
 
 # Обработчик команды /history_tasks
