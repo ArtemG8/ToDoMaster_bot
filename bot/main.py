@@ -231,9 +231,10 @@ def build_complete_task_keyboard(tasks, filter_type, page=0):
     if nav_buttons:
         builder.row(*nav_buttons)
 
+    # ИЗМЕНЕНИЕ ЗДЕСЬ: Передаем filter_type для корректного восстановления списка
     builder.row(types.InlineKeyboardButton(
         text="❌ Отменить завершение",
-        callback_data="cancel_complete"
+        callback_data=TaskListFilterCallback(filter_type=filter_type).pack()
     ))
     return builder.as_markup()
 
@@ -480,37 +481,20 @@ async def process_complete_task_action(callback_query: types.CallbackQuery, call
         await callback_query.answer("Неизвестное действие.")
 
 
-# Обработчик callback для завершения задачи / пагинации / отмены завершения
-@task_router.callback_query(lambda c: c.data and (c.data.startswith("complete_task") or c.data == "cancel_complete"))
-async def process_complete_task_callback(callback_query: types.CallbackQuery, state: FSMContext):
-    data = callback_query.data
+# Обработчик callback для завершения задачи / пагинации
+# ИЗМЕНЕНИЕ ЗДЕСЬ: Убрана обработка 'cancel_complete', теперь она обрабатывается TaskListFilterCallback
+@task_router.callback_query(CompleteTaskCallback.filter())
+async def process_complete_task_callback(callback_query: types.CallbackQuery, callback_data: CompleteTaskCallback, state: FSMContext):
     user_id = callback_query.from_user.id
-
-    if data == "cancel_complete":
-        # При отмене показываем исходный список задач с фильтром, не сообщение "Отменено завершение"
-        # Чтобы сохранить текущий фильтр, определим его по клавиатуре или по дефолту
-        # Но проще сохранить фильтр в data (это можно усложнить), пока вернем дефолт all
-        # Если хотите, можно попробовать парсить callback_query.message.reply_markup, но проще универсально:
-        # Покажем все активные задачи (filter_type='all')
-        await send_task_list(callback_query.message, user_id, filter_type="all", status_filter='active')
-        await callback_query.answer("Завершение задачи отменено.")
-        return
-
-    try:
-        cb = CompleteTaskCallback.unpack(data)
-    except Exception:
-        await callback_query.answer("Ошибка. Попробуйте снова.", show_alert=True)
-        return
-
-    filter_type = cb.filter_type
-    page = cb.page
-    selected_task_number = cb.task_number
+    filter_type = callback_data.filter_type
+    page = callback_data.page
+    selected_task_number = callback_data.task_number
 
     tasks = get_tasks_for_user(user_id, filter_type=filter_type, status_filter='active')
 
     if selected_task_number is not None:
         # Пользователь выбрал задачу для завершения
-        conn = sqlite3.connect(DATABASE_NAME)
+        conn = sqlite3.connect(DATABASE_name)
         cursor = conn.cursor()
         cursor.execute("SELECT description FROM tasks WHERE user_id = ? AND task_number = ? AND status = 'active'",
                        (user_id, selected_task_number))
