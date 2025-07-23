@@ -166,6 +166,21 @@ class CompleteTaskCallback(CallbackData, prefix="complete_task"):
     page: int = 0  # страница отображения при пагинации
     task_number: int | None = None  # номер задачи для завершения (None — просто просмотр списка)
 
+# Новая CallbackData для возврата в главное меню
+class MainMenuCallback(CallbackData, prefix="main_menu"):
+    action: str = "show"
+
+# Новая функция для генерации инлайн-клавиатуры "Главное меню"
+def get_main_menu_inline_keyboard():
+    builder = InlineKeyboardBuilder()
+    builder.add(types.InlineKeyboardButton(text="🏠 Главное меню", callback_data=MainMenuCallback().pack()))
+    return builder.as_markup()
+
+
+@task_router.callback_query(MainMenuCallback.filter())
+async def process_main_menu_callback(callback_query: types.CallbackQuery):
+    await callback_query.message.edit_text(welcome_text, reply_markup=None)
+    await callback_query.answer()
 
 # Главная клавиатура с кнопками фильтров и кнопкой "Завершить задачу"
 def get_task_list_keyboard(current_filter: str = None):
@@ -494,7 +509,7 @@ async def process_complete_task_callback(callback_query: types.CallbackQuery, ca
 
     if selected_task_number is not None:
         # Пользователь выбрал задачу для завершения
-        conn = sqlite3.connect(DATABASE_name)
+        conn = sqlite3.connect(DATABASE_NAME) # Corrected variable name from DATABASE_name to DATABASE_NAME
         cursor = conn.cursor()
         cursor.execute("SELECT description FROM tasks WHERE user_id = ? AND task_number = ? AND status = 'active'",
                        (user_id, selected_task_number))
@@ -536,7 +551,7 @@ async def cmd_edit_task(message: types.Message, state: FSMContext):
     conn.close()
 
     if not tasks:
-        await message.answer("У вас нет активных задач для редактирования.")
+        await message.answer("У вас нет активных задач для редактирования.", reply_markup=get_main_menu_inline_keyboard()) # Added inline keyboard
         await state.clear()
         return
 
@@ -556,7 +571,7 @@ async def process_edit_task_number(message: types.Message, state: FSMContext):
     try:
         user_provided_task_number = int(message.text)
     except ValueError:
-        await message.answer("Пожалуйста, введите корректный числовой номер задачи.")
+        await message.answer("Пожалуйста, введите корректный числовой номер задачи.", reply_markup=get_main_menu_inline_keyboard()) # Added inline keyboard
         return
 
     user_id = message.from_user.id
@@ -570,7 +585,8 @@ async def process_edit_task_number(message: types.Message, state: FSMContext):
 
     if not task:
         await message.answer(
-            "Активная задача с таким номером не найдена. Пожалуйста, введите корректный номер.")
+            "Активная задача с таким номером не найдена. Пожалуйста, введите корректный номер.",
+            reply_markup=get_main_menu_inline_keyboard()) # Added inline keyboard
         return
 
     internal_db_id = task[0]
@@ -598,7 +614,8 @@ async def process_edit_task_number(message: types.Message, state: FSMContext):
 @task_router.message(EditTask.waiting_for_new_data, F.text.in_({"Описание", "Срок выполнения", "Отмена"}))
 async def process_edit_field_selection(message: types.Message, state: FSMContext):
     if message.text == "Отмена":
-        await message.answer("Редактирование отменено.", reply_markup=types.ReplyKeyboardRemove())
+        await message.answer("Редактирование отменено.",
+                             reply_markup=get_main_menu_inline_keyboard()) # Removed ReplyKeyboardRemove and added inline keyboard
         await state.clear()
         return
 
@@ -614,7 +631,8 @@ async def process_edit_field_selection(message: types.Message, state: FSMContext
 @task_router.message(EditTask.waiting_for_new_description)
 async def process_new_description(message: types.Message, state: FSMContext):
     if not message.text:
-        await message.answer("Пожалуйста, введите описание задачи текстом.")
+        await message.answer("Пожалуйста, введите описание задачи текстом.",
+                             reply_markup=get_main_menu_inline_keyboard()) # Added inline keyboard
         return
 
     data = await state.get_data()
@@ -630,10 +648,12 @@ async def process_new_description(message: types.Message, state: FSMContext):
     conn.close()
 
     if cursor.rowcount > 0:
-        await message.answer(f"Описание задачи (Номер: {task_number_for_user}) обновлено на: '{new_description}'")
+        await message.answer(f"Описание задачи (Номер: {task_number_for_user}) обновлено на: '{new_description}'",
+                             reply_markup=get_main_menu_inline_keyboard()) # Added inline keyboard
     else:
         await message.answer(
-            "Не удалось обновить задачу. Возможно, задача не найдена, не принадлежит вам или неактивна.")
+            "Не удалось обновить задачу. Возможно, задача не найдена, не принадлежит вам или неактивна.",
+            reply_markup=get_main_menu_inline_keyboard()) # Added inline keyboard
     await state.clear()
 
 
@@ -658,10 +678,12 @@ async def process_edit_deadline_calendar(callback_query: types.CallbackQuery, ca
         if cursor.rowcount > 0:
             formatted_deadline_display = format_deadline(deadline_str)
             await callback_query.message.edit_text(
-                f"Срок выполнения задачи (Номер: {task_number_for_user}) обновлен на: '{formatted_deadline_display}'")
+                f"Срок выполнения задачи (Номер: {task_number_for_user}) обновлен на: '{formatted_deadline_display}'",
+                reply_markup=get_main_menu_inline_keyboard()) # Added inline keyboard
         else:
             await callback_query.message.edit_text(
-                "Не удалось обновить задачу. Возможно, задача не найдена, не принадлежит вам или неактивна.")
+                "Не удалось обновить задачу. Возможно, задача не найдена, не принадлежит вам или неактивна.",
+                reply_markup=get_main_menu_inline_keyboard()) # Added inline keyboard
         await state.clear()
         await callback_query.answer()
     else:
@@ -681,7 +703,7 @@ async def cmd_delete_task(message: types.Message, state: FSMContext):
     conn.close()
 
     if not tasks:
-        await message.answer("У вас нет активных задач для удаления.")
+        await message.answer("У вас нет активных задач для удаления.", reply_markup=get_main_menu_inline_keyboard()) # Added inline keyboard
         await state.clear()
         return
 
@@ -701,7 +723,7 @@ async def process_delete_task_number(message: types.Message, state: FSMContext):
     try:
         user_provided_task_number = int(message.text)
     except ValueError:
-        await message.answer("Пожалуйста, введите корректный числовой номер задачи.")
+        await message.answer("Пожалуйста, введите корректный числовой номер задачи.", reply_markup=get_main_menu_inline_keyboard()) # Added inline keyboard
         return
 
     user_id = message.from_user.id
@@ -715,7 +737,8 @@ async def process_delete_task_number(message: types.Message, state: FSMContext):
 
     if not task:
         await message.answer(
-            "Активная задача с таким номером не найдена или не принадлежит вам. Пожалуйста, введите корректный номер.")
+            "Активная задача с таким номером не найдена или не принадлежит вам. Пожалуйста, введите корректный номер.",
+            reply_markup=get_main_menu_inline_keyboard()) # Added inline keyboard
         return
 
     internal_db_id = task[0]
@@ -756,13 +779,13 @@ async def process_delete_confirmation(message: types.Message, state: FSMContext)
 
         if cursor.rowcount > 0:
             await message.answer(f"Задача '{task_description}' (Номер: {task_number_for_user}) успешно удалена.",
-                                 reply_markup=types.ReplyKeyboardRemove())
+                                 reply_markup=get_main_menu_inline_keyboard()) # Replaced ReplyKeyboardRemove with inline keyboard
         else:
             await message.answer(
                 "Не удалось удалить задачу. Возможно, задача уже была удалена, не принадлежит вам или неактивна.",
-                reply_markup=types.ReplyKeyboardRemove())
+                reply_markup=get_main_menu_inline_keyboard()) # Replaced ReplyKeyboardRemove with inline keyboard
     else:
-        await message.answer("Удаление отменено.", reply_markup=types.ReplyKeyboardRemove())
+        await message.answer("Удаление отменено.", reply_markup=get_main_menu_inline_keyboard()) # Replaced ReplyKeyboardRemove with inline keyboard
     await state.clear()
 
 
@@ -782,3 +805,4 @@ if __name__ == "__main__":
         print("Бот остановлен.")
     except Exception as e:
         print(f"Произошла ошибка: {e}")
+
