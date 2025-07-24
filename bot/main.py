@@ -129,14 +129,14 @@ class AddTask(StatesGroup):
 
 
 class EditTask(StatesGroup):
-    waiting_for_task_number = State()
+    # waiting_for_task_number = State() # No longer needed, handled by callback
     waiting_for_new_data = State()
     waiting_for_new_description = State()
     waiting_for_new_deadline = State()
 
 
 class DeleteTask(StatesGroup):
-    waiting_for_task_number = State()
+    # waiting_for_task_number = State() # No longer needed, handled by callback
     waiting_for_confirmation = State()
 
 
@@ -148,7 +148,6 @@ class CompleteTask(StatesGroup):
 welcome_router = Router()
 task_router = Router()
 
-# --- НОВЫЕ CALLBACKDATA И КОНСТАНТЫ ДЛЯ ЗАВЕРШЕНИЯ ЗАДАЧ ---
 
 PAGE_SIZE = 5  # Кол-во задач на странице для пагинации
 
@@ -165,6 +164,18 @@ class CompleteTaskCallback(CallbackData, prefix="complete_task"):
     filter_type: str  # 'today', 'week', 'month', 'all'
     page: int = 0  # страница отображения при пагинации
     task_number: int | None = None  # номер задачи для завершения (None — просто просмотр списка)
+
+# Новые CallbackData для редактирования и удаления задач
+class EditTaskCallback(CallbackData, prefix="edit_task"):
+    page: int = 0
+    task_number: int | None = None
+    action: str = "view"  # 'view' for pagination, 'select' for selecting a task
+
+class DeleteTaskCallback(CallbackData, prefix="delete_task"):
+    page: int = 0
+    task_number: int | None = None
+    action: str = "view"  # 'view' for pagination, 'select' for selecting a task
+
 
 # Новая CallbackData для возврата в главное меню
 class MainMenuCallback(CallbackData, prefix="main_menu"):
@@ -215,12 +226,65 @@ def get_task_list_keyboard(current_filter: str = None):
     return builder.as_markup()
 
 
-# Формируем клавиатуру с номерами задач для завершения (с пагинацией)
+# Формируем клавиатуру с номерами задач для выбора (с пагинацией)
+def build_task_selection_keyboard(tasks, callback_constructor, page=0):
+    builder = InlineKeyboardBuilder()
+    start = page * PAGE_SIZE
+    end = start + PAGE_SIZE
+    page_tasks = tasks[start:end]
+
+    # Handle case where the current page becomes empty after an action (e.g., deletion)
+    if not page_tasks and page > 0:
+        # Try to navigate to the previous page
+        return build_task_selection_keyboard(tasks, callback_constructor, page - 1)
+    elif not page_tasks: # No tasks at all or on first page with no tasks
+        builder.row(types.InlineKeyboardButton(text="❌ Отмена", callback_data=MainMenuCallback().pack()))
+        return builder.as_markup()
+
+    for task_number, description, deadline in page_tasks:
+        formatted_deadline = format_deadline(deadline)
+        deadline_str = f" ({formatted_deadline})" if formatted_deadline else ""
+        # Shorten description for button text if too long
+        button_text = f"{task_number}. {description[:30]}{'...' if len(description) > 30 else ''}{deadline_str}"
+
+        builder.row(types.InlineKeyboardButton(
+            text=button_text,
+            callback_data=callback_constructor(page=page, task_number=task_number, action="select").pack()
+        ))
+
+    nav_buttons = []
+    if page > 0:
+        nav_buttons.append(types.InlineKeyboardButton(
+            text="⬅️ Назад",
+            callback_data=callback_constructor(page=page - 1, action="view").pack()
+        ))
+    if end < len(tasks):
+        nav_buttons.append(types.InlineKeyboardButton(
+            text="Вперед ➡️",
+            callback_data=callback_constructor(page=page + 1, action="view").pack()
+        ))
+    if nav_buttons:
+        builder.row(*nav_buttons)
+
+    builder.row(types.InlineKeyboardButton(
+        text="❌ Отмена",
+        callback_data=MainMenuCallback().pack()
+    ))
+    return builder.as_markup()
+
+
 def build_complete_task_keyboard(tasks, filter_type, page=0):
     builder = InlineKeyboardBuilder()
     start = page * PAGE_SIZE
     end = start + PAGE_SIZE
     page_tasks = tasks[start:end]
+
+    if not page_tasks and page > 0:
+        return build_complete_task_keyboard(tasks, filter_type, page - 1)
+    elif not page_tasks:
+        builder.row(types.InlineKeyboardButton(text="❌ Отмена", callback_data=TaskListFilterCallback(filter_type=filter_type).pack()))
+        return builder.as_markup()
+
 
     for task_number, description, deadline in page_tasks:
         formatted_deadline = format_deadline(deadline)
@@ -246,12 +310,18 @@ def build_complete_task_keyboard(tasks, filter_type, page=0):
     if nav_buttons:
         builder.row(*nav_buttons)
 
-    # ИЗМЕНЕНИЕ ЗДЕСЬ: Передаем filter_type для корректного восстановления списка
     builder.row(types.InlineKeyboardButton(
         text="❌ Отменить завершение",
         callback_data=TaskListFilterCallback(filter_type=filter_type).pack()
     ))
     return builder.as_markup()
+
+
+def build_edit_task_keyboard(tasks, page=0):
+    return build_task_selection_keyboard(tasks, EditTaskCallback, page)
+
+def build_delete_task_keyboard(tasks, page=0):
+    return build_task_selection_keyboard(tasks, DeleteTaskCallback, page)
 
 
 # Вспомогательная функция получения задач с фильтром и статусом
@@ -497,7 +567,6 @@ async def process_complete_task_action(callback_query: types.CallbackQuery, call
 
 
 # Обработчик callback для завершения задачи / пагинации
-# ИЗМЕНЕНИЕ ЗДЕСЬ: Убрана обработка 'cancel_complete', теперь она обрабатывается TaskListFilterCallback
 @task_router.callback_query(CompleteTaskCallback.filter())
 async def process_complete_task_callback(callback_query: types.CallbackQuery, callback_data: CompleteTaskCallback, state: FSMContext):
     user_id = callback_query.from_user.id
@@ -509,7 +578,7 @@ async def process_complete_task_callback(callback_query: types.CallbackQuery, ca
 
     if selected_task_number is not None:
         # Пользователь выбрал задачу для завершения
-        conn = sqlite3.connect(DATABASE_NAME) # Corrected variable name from DATABASE_name to DATABASE_NAME
+        conn = sqlite3.connect(DATABASE_NAME)
         cursor = conn.cursor()
         cursor.execute("SELECT description FROM tasks WHERE user_id = ? AND task_number = ? AND status = 'active'",
                        (user_id, selected_task_number))
@@ -517,6 +586,13 @@ async def process_complete_task_callback(callback_query: types.CallbackQuery, ca
         if not task_info:
             await callback_query.answer("Задача не найдена или уже завершена.", show_alert=True)
             conn.close()
+            # Если задача не найдена, обновляем список
+            keyboard = build_complete_task_keyboard(tasks, filter_type, page)
+            try:
+                await callback_query.message.edit_reply_markup(reply_markup=keyboard)
+            except aiogram.exceptions.TelegramBadRequest as e:
+                if "message is not modified" not in str(e):
+                    raise e
             return
         task_description = task_info[0]
 
@@ -534,7 +610,11 @@ async def process_complete_task_callback(callback_query: types.CallbackQuery, ca
     else:
         # Переход по страницам пагинации
         keyboard = build_complete_task_keyboard(tasks, filter_type, page=page)
-        await callback_query.message.edit_reply_markup(reply_markup=keyboard)
+        try:
+            await callback_query.message.edit_reply_markup(reply_markup=keyboard)
+        except aiogram.exceptions.TelegramBadRequest as e:
+            if "message is not modified" not in str(e):
+                raise e
         await callback_query.answer()
 
 
@@ -542,80 +622,94 @@ async def process_complete_task_callback(callback_query: types.CallbackQuery, ca
 @task_router.message(Command("edit_task"))
 async def cmd_edit_task(message: types.Message, state: FSMContext):
     user_id = message.from_user.id
-    conn = sqlite3.connect(DATABASE_NAME)
-    cursor = conn.cursor()
-    cursor.execute(
-        "SELECT task_number, description, deadline FROM tasks WHERE user_id = ? AND status = 'active' ORDER BY task_number",
-        (user_id,))
-    tasks = cursor.fetchall()
-    conn.close()
+    tasks = get_tasks_for_user(user_id, filter_type="all", status_filter='active')
 
     if not tasks:
-        await message.answer("У вас нет активных задач для редактирования.", reply_markup=get_main_menu_inline_keyboard()) # Added inline keyboard
+        await message.answer("У вас нет активных задач для редактирования.", reply_markup=get_main_menu_inline_keyboard())
         await state.clear()
         return
 
-    response = "✏ Выберите задачу для редактирования, указав её номер:\n\n"
-    for task_number, description, deadline in tasks:
-        formatted_deadline = format_deadline(deadline)
-        deadline_str = f" (Срок выполнения: {formatted_deadline})" if formatted_deadline else ""
-        response += f"Номер: {task_number}\n   Задача: {description}{deadline_str}\n"
-    response += "\nВведите номер задачи, которую хотите изменить."
-
-    await message.answer(response, reply_markup=types.ReplyKeyboardRemove())
-    await state.set_state(EditTask.waiting_for_task_number)
+    keyboard = build_edit_task_keyboard(tasks, page=0)
+    await message.answer("✏ Выберите задачу для редактирования:", reply_markup=keyboard)
+    # State is not set here, it will be set by the callback handler once a task is selected.
 
 
-@task_router.message(EditTask.waiting_for_task_number)
-async def process_edit_task_number(message: types.Message, state: FSMContext):
-    try:
-        user_provided_task_number = int(message.text)
-    except ValueError:
-        await message.answer("Пожалуйста, введите корректный числовой номер задачи.", reply_markup=get_main_menu_inline_keyboard()) # Added inline keyboard
+@task_router.callback_query(EditTaskCallback.filter())
+async def process_edit_task_callback(callback_query: types.CallbackQuery, callback_data: EditTaskCallback,
+                                     state: FSMContext):
+    user_id = callback_query.from_user.id
+    tasks = get_tasks_for_user(user_id, filter_type="all", status_filter='active')
+
+    if not tasks:
+        await callback_query.message.edit_text("У вас нет активных задач для редактирования.",
+                                               reply_markup=get_main_menu_inline_keyboard())
+        await callback_query.answer()
         return
 
-    user_id = message.from_user.id
-    conn = sqlite3.connect(DATABASE_NAME)
-    cursor = conn.cursor()
-    cursor.execute(
-        "SELECT id, task_number, description, deadline FROM tasks WHERE user_id = ? AND task_number = ? AND status = 'active'",
-        (user_id, user_provided_task_number))
-    task = cursor.fetchone()
-    conn.close()
+    if callback_data.action == "view":
+        # Handle pagination
+        keyboard = build_edit_task_keyboard(tasks, page=callback_data.page)
+        try:
+            await callback_query.message.edit_reply_markup(reply_markup=keyboard)
+        except aiogram.exceptions.TelegramBadRequest as e:
+            if "message is not modified" not in str(e):
+                raise e
+        await callback_query.answer()
+    elif callback_data.action == "select":
+        # User selected a task
+        selected_task_number = callback_data.task_number
 
-    if not task:
-        await message.answer(
-            " 😞 Активная задача с таким номером не найдена. Пожалуйста, введите корректный номер.",
-            reply_markup=get_main_menu_inline_keyboard()) # Added inline keyboard
-        return
+        conn = sqlite3.connect(DATABASE_NAME)
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT id, task_number, description, deadline FROM tasks WHERE user_id = ? AND task_number = ? AND status = 'active'",
+            (user_id, selected_task_number))
+        task = cursor.fetchone()
+        conn.close()
 
-    internal_db_id = task[0]
-    task_number_for_user = task[1]
+        if not task:
+            await callback_query.answer("Задача не найдена или уже завершена.", show_alert=True)
+            keyboard = build_edit_task_keyboard(tasks, page=callback_data.page)
+            try:
+                await callback_query.message.edit_text(
+                    "Задача не найдена или уже завершена. Выберите другую задачу или отмените.", reply_markup=keyboard)
+            except aiogram.exceptions.TelegramBadRequest as e:
+                if "message is not modified" not in str(e):
+                    raise e
+            return
 
-    await state.update_data(editing_internal_db_id=internal_db_id, editing_task_number=task_number_for_user)
-    keyboard = types.ReplyKeyboardMarkup(
-        keyboard=[
-            [types.KeyboardButton(text="Описание"), types.KeyboardButton(text="Срок выполнения")],
-            [types.KeyboardButton(text="Отмена")]
-        ],
-        resize_keyboard=True,
-        one_time_keyboard=True
-    )
+        internal_db_id = task[0]
+        task_number_for_user = task[1]
 
-    formatted_current_deadline_display = format_deadline(task[3])
-    deadline_display = f"Срок выполнения: {formatted_current_deadline_display}" if formatted_current_deadline_display else "Срок выполнения: не указан"
+        # Определяем deadline_display здесь
+        formatted_current_deadline_display = format_deadline(task[3])
+        deadline_display = f"Срок выполнения: {formatted_current_deadline_display}" if formatted_current_deadline_display else "Срок выполнения: не указан"
 
-    await message.answer(
-        f"Вы выбрали задачу с номером {task_number_for_user}.\nОписание: {task[2]}\n{deadline_display}\n\nЧто хотите изменить? ✏️",
-        reply_markup=keyboard)
-    await state.set_state(EditTask.waiting_for_new_data)
+        await state.update_data(editing_internal_db_id=internal_db_id, editing_task_number=task_number_for_user)
+        keyboard = types.ReplyKeyboardMarkup(
+            keyboard=[
+                [types.KeyboardButton(text="Описание"), types.KeyboardButton(text="Срок выполнения")],
+                [types.KeyboardButton(text="Отмена")]
+            ],
+            resize_keyboard=True,
+            one_time_keyboard=True
+        )
+
+        await callback_query.message.delete()  # Удаляет сообщение, на котором были кнопки выбора
+
+        # Отправляем новое сообщение с ReplyKeyboardMarkup
+        await callback_query.message.answer(
+            f"Вы выбрали задачу с номером {task_number_for_user}.\nОписание: {task[2]}\n{deadline_display}\n\nЧто хотите изменить? ✏️",
+            reply_markup=keyboard)
+        await state.set_state(EditTask.waiting_for_new_data)
+        await callback_query.answer()
 
 
 @task_router.message(EditTask.waiting_for_new_data, F.text.in_({"Описание", "Срок выполнения", "Отмена"}))
 async def process_edit_field_selection(message: types.Message, state: FSMContext):
     if message.text == "Отмена":
         await message.answer("Редактирование отменено.",
-                             reply_markup=get_main_menu_inline_keyboard()) # Removed ReplyKeyboardRemove and added inline keyboard
+                             reply_markup=get_main_menu_inline_keyboard())
         await state.clear()
         return
 
@@ -632,7 +726,7 @@ async def process_edit_field_selection(message: types.Message, state: FSMContext
 async def process_new_description(message: types.Message, state: FSMContext):
     if not message.text:
         await message.answer("Пожалуйста, введите описание задачи текстом.",
-                             reply_markup=get_main_menu_inline_keyboard()) # Added inline keyboard
+                             reply_markup=get_main_menu_inline_keyboard())
         return
 
     data = await state.get_data()
@@ -649,11 +743,11 @@ async def process_new_description(message: types.Message, state: FSMContext):
 
     if cursor.rowcount > 0:
         await message.answer(f"Описание задачи (Номер: {task_number_for_user}) обновлено на: '{new_description}'",
-                             reply_markup=get_main_menu_inline_keyboard()) # Added inline keyboard
+                             reply_markup=get_main_menu_inline_keyboard())
     else:
         await message.answer(
             "Не удалось обновить задачу. Возможно, задача не найдена, не принадлежит вам или неактивна.",
-            reply_markup=get_main_menu_inline_keyboard()) # Added inline keyboard
+            reply_markup=get_main_menu_inline_keyboard())
     await state.clear()
 
 
@@ -679,11 +773,11 @@ async def process_edit_deadline_calendar(callback_query: types.CallbackQuery, ca
             formatted_deadline_display = format_deadline(deadline_str)
             await callback_query.message.edit_text(
                 f"Срок выполнения задачи (Номер: {task_number_for_user}) обновлен на: '{formatted_deadline_display}'",
-                reply_markup=get_main_menu_inline_keyboard()) # Added inline keyboard
+                reply_markup=get_main_menu_inline_keyboard())
         else:
             await callback_query.message.edit_text(
                 "Не удалось обновить задачу. Возможно, задача не найдена, не принадлежит вам или неактивна.",
-                reply_markup=get_main_menu_inline_keyboard()) # Added inline keyboard
+                reply_markup=get_main_menu_inline_keyboard())
         await state.clear()
         await callback_query.answer()
     else:
@@ -694,71 +788,83 @@ async def process_edit_deadline_calendar(callback_query: types.CallbackQuery, ca
 @task_router.message(Command("delete_task"))
 async def cmd_delete_task(message: types.Message, state: FSMContext):
     user_id = message.from_user.id
-    conn = sqlite3.connect(DATABASE_NAME)
-    cursor = conn.cursor()
-    cursor.execute(
-        "SELECT task_number, description, deadline FROM tasks WHERE user_id = ? AND status = 'active' ORDER BY task_number",
-        (user_id,))
-    tasks = cursor.fetchall()
-    conn.close()
+    tasks = get_tasks_for_user(user_id, filter_type="all", status_filter='active')
 
     if not tasks:
-        await message.answer("У вас нет активных задач для удаления.", reply_markup=get_main_menu_inline_keyboard()) # Added inline keyboard
+        await message.answer("У вас нет активных задач для удаления.", reply_markup=get_main_menu_inline_keyboard())
         await state.clear()
         return
 
-    response = "Выберите задачу для удаления, указав её номер:\n\n"
-    for task_number, description, deadline in tasks:
-        formatted_deadline = format_deadline(deadline)
-        deadline_str = f" (Срок выполнения: {formatted_deadline})" if formatted_deadline else ""
-        response += f"Номер: {task_number}\n   Задача: {description}{deadline_str}\n"
-    response += "\nВведите номер задачи, которую хотите удалить."
-
-    await message.answer(response)
-    await state.set_state(DeleteTask.waiting_for_task_number)
+    keyboard = build_delete_task_keyboard(tasks, page=0)
+    await message.answer("🗑 Выберите задачу для удаления:", reply_markup=keyboard)
+    # State is not set here, it will be set by the callback handler once a task is selected.
 
 
-@task_router.message(DeleteTask.waiting_for_task_number)
-async def process_delete_task_number(message: types.Message, state: FSMContext):
-    try:
-        user_provided_task_number = int(message.text)
-    except ValueError:
-        await message.answer("Пожалуйста, введите корректный числовой номер задачи.", reply_markup=get_main_menu_inline_keyboard()) # Added inline keyboard
+@task_router.callback_query(DeleteTaskCallback.filter())
+async def process_delete_task_callback(callback_query: types.CallbackQuery, callback_data: DeleteTaskCallback, state: FSMContext):
+    user_id = callback_query.from_user.id
+    tasks = get_tasks_for_user(user_id, filter_type="all", status_filter='active')
+
+    if not tasks:
+        await callback_query.message.edit_text("У вас нет активных задач для удаления.", reply_markup=get_main_menu_inline_keyboard())
+        await callback_query.answer()
         return
 
-    user_id = message.from_user.id
-    conn = sqlite3.connect(DATABASE_NAME)
-    cursor = conn.cursor()
-    cursor.execute(
-        "SELECT id, task_number, description, deadline FROM tasks WHERE user_id = ? AND task_number = ? AND status = 'active'",
-        (user_id, user_provided_task_number))
-    task = cursor.fetchone()
-    conn.close()
+    if callback_data.action == "view":
+        # Handle pagination
+        keyboard = build_delete_task_keyboard(tasks, page=callback_data.page)
+        try:
+            await callback_query.message.edit_reply_markup(reply_markup=keyboard)
+        except aiogram.exceptions.TelegramBadRequest as e:
+            if "message is not modified" not in str(e):
+                raise e
+        await callback_query.answer()
+    elif callback_data.action == "select":
+        # User selected a task
+        selected_task_number = callback_data.task_number
 
-    if not task:
-        await message.answer(
-            "Активная задача с таким номером не найдена или не принадлежит вам. Пожалуйста, введите корректный номер.",
-            reply_markup=get_main_menu_inline_keyboard()) # Added inline keyboard
-        return
+        conn = sqlite3.connect(DATABASE_NAME)
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT id, task_number, description, deadline FROM tasks WHERE user_id = ? AND task_number = ? AND status = 'active'",
+            (user_id, selected_task_number))
+        task = cursor.fetchone()
+        conn.close()
 
-    internal_db_id = task[0]
-    task_number_for_user = task[1]
-    task_description = task[2]
+        if not task:
+            await callback_query.answer("Задача не найдена или уже завершена.", show_alert=True)
+            keyboard = build_delete_task_keyboard(tasks, page=callback_data.page)
+            try:
+                await callback_query.message.edit_text("Задача не найдена или уже завершена. Выберите другую задачу или отмените.", reply_markup=keyboard)
+            except aiogram.exceptions.TelegramBadRequest as e:
+                if "message is not modified" not in str(e):
+                    raise e
+            return
 
-    await state.update_data(deleting_internal_db_id=internal_db_id, deleting_task_number=task_number_for_user,
-                            deleting_task_desc=task_description)
+        internal_db_id = task[0]
+        task_number_for_user = task[1]
+        task_description = task[2]
 
-    keyboard = types.ReplyKeyboardMarkup(
-        keyboard=[
-            [types.KeyboardButton(text="Да"), types.KeyboardButton(text="Нет")]
-        ],
-        resize_keyboard=True,
-        one_time_keyboard=True
-    )
-    await message.answer(
-        f"👁 Вы уверены, что хотите удалить задачу (Номер: {task_number_for_user}): '{task_description}'? (Да/Нет)",
-        reply_markup=keyboard)
-    await state.set_state(DeleteTask.waiting_for_confirmation)
+        await state.update_data(deleting_internal_db_id=internal_db_id, deleting_task_number=task_number_for_user,
+                                deleting_task_desc=task_description)
+
+        keyboard = types.ReplyKeyboardMarkup(
+            keyboard=[
+                [types.KeyboardButton(text="Да"), types.KeyboardButton(text="Нет")]
+            ],
+            resize_keyboard=True,
+            one_time_keyboard=True
+        )
+        await callback_query.message.delete() # Удаляет сообщение, на котором были кнопки выбора
+
+        # Отправляем новое сообщение с ReplyKeyboardMarkup
+        await callback_query.message.answer(
+            f"👁 Вы уверены, что хотите удалить задачу (Номер: {task_number_for_user}): '{task_description}'? (Да/Нет)",
+            reply_markup=keyboard)
+        await state.set_state(DeleteTask.waiting_for_confirmation)
+        await callback_query.answer()
+
+
 
 
 @task_router.message(DeleteTask.waiting_for_confirmation, F.text.in_({"Да", "Нет"}))
@@ -779,13 +885,13 @@ async def process_delete_confirmation(message: types.Message, state: FSMContext)
 
         if cursor.rowcount > 0:
             await message.answer(f"Задача '{task_description}' (Номер: {task_number_for_user}) успешно удалена.",
-                                 reply_markup=get_main_menu_inline_keyboard()) # Replaced ReplyKeyboardRemove with inline keyboard
+                                 reply_markup=get_main_menu_inline_keyboard())
         else:
             await message.answer(
                 "Не удалось удалить задачу. Возможно, задача уже была удалена, не принадлежит вам или неактивна.",
-                reply_markup=get_main_menu_inline_keyboard()) # Replaced ReplyKeyboardRemove with inline keyboard
+                reply_markup=get_main_menu_inline_keyboard())
     else:
-        await message.answer("Удаление отменено.", reply_markup=get_main_menu_inline_keyboard()) # Replaced ReplyKeyboardRemove with inline keyboard
+        await message.answer("Удаление отменено.", reply_markup=get_main_menu_inline_keyboard())
     await state.clear()
 
 
