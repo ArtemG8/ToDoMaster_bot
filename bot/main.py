@@ -311,11 +311,11 @@ async def send_task_list(target_message_or_query: types.Message | types.Callback
             elif filter_type == "month":
                 response_header = "🗓 Ваши активные задачи на текущий месяц:\n\n"
             elif task_limit:
-                response_header = "Ваши последние 5 активных задач:\n\n"
+                response_header = "📞 Ваши последние 5 активных задач:\n\n"
             elif filter_type == "all":
-                response_header = "Ваши все активные задачи:\n\n"
+                response_header = "🗓 Ваши все активные задачи:\n\n"
         else:
-            response_header = "Ваши завершенные задачи:\n\n"
+            response_header = "🏆 Ваши завершенные задачи:\n\n"
 
         response = response_header
         selected_tasks = tasks if not task_limit else tasks[-5::1]
@@ -417,7 +417,7 @@ async def process_add_deadline_calendar(callback_query: types.CallbackQuery, cal
 
         formatted_deadline_display = format_deadline(deadline_str)
         await callback_query.message.edit_text(
-            f"Задача '{description}' (Номер: {new_task_number}) со сроком выполнения '{formatted_deadline_display}' добавлена!\n"
+            f"✍ Задача '{description}' (Номер: {new_task_number}) со сроком выполнения '{formatted_deadline_display}' добавлена!\n"
             f"Хотите ещё? /add_task \nПосмотреть все задачи: /list_tasks")
         await state.clear()
         await callback_query.answer()
@@ -555,7 +555,7 @@ async def cmd_edit_task(message: types.Message, state: FSMContext):
         await state.clear()
         return
 
-    response = "Выберите задачу для редактирования, указав её номер:\n\n"
+    response = "✏ Выберите задачу для редактирования, указав её номер:\n\n"
     for task_number, description, deadline in tasks:
         formatted_deadline = format_deadline(deadline)
         deadline_str = f" (Срок выполнения: {formatted_deadline})" if formatted_deadline else ""
@@ -585,7 +585,7 @@ async def process_edit_task_number(message: types.Message, state: FSMContext):
 
     if not task:
         await message.answer(
-            "Активная задача с таким номером не найдена. Пожалуйста, введите корректный номер.",
+            " 😞 Активная задача с таким номером не найдена. Пожалуйста, введите корректный номер.",
             reply_markup=get_main_menu_inline_keyboard()) # Added inline keyboard
         return
 
@@ -606,7 +606,7 @@ async def process_edit_task_number(message: types.Message, state: FSMContext):
     deadline_display = f"Срок выполнения: {formatted_current_deadline_display}" if formatted_current_deadline_display else "Срок выполнения: не указан"
 
     await message.answer(
-        f"Вы выбрали задачу:\nНомер: {task_number_for_user}\nЗадача: {task[2]}\n{deadline_display}\n\nЧто хотите изменить?",
+        f"Вы выбрали задачу с номером {task_number_for_user}.\nОписание: {task[2]}\n{deadline_display}\n\nЧто хотите изменить? ✏️",
         reply_markup=keyboard)
     await state.set_state(EditTask.waiting_for_new_data)
 
@@ -756,7 +756,7 @@ async def process_delete_task_number(message: types.Message, state: FSMContext):
         one_time_keyboard=True
     )
     await message.answer(
-        f"Вы уверены, что хотите удалить задачу (Номер: {task_number_for_user}): '{task_description}'? (Да/Нет)",
+        f"👁 Вы уверены, что хотите удалить задачу (Номер: {task_number_for_user}): '{task_description}'? (Да/Нет)",
         reply_markup=keyboard)
     await state.set_state(DeleteTask.waiting_for_confirmation)
 
