@@ -51,7 +51,8 @@ def init_db():
     conn = sqlite3.connect(DATABASE_NAME)
     cursor = conn.cursor()
 
-    # Создаем таблицу, если она не существует
+    # Создаем таблицу задач, если она не существует
+    #Добавляем столбец remind_me
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS tasks (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -59,7 +60,8 @@ def init_db():
             task_number INTEGER,
             description TEXT NOT NULL,
             deadline TEXT,
-            status TEXT DEFAULT 'active' -- Добавляем новый столбец status
+            status TEXT DEFAULT 'active',
+            remind_me INTEGER DEFAULT 0 -- 0: не напоминать, 1: напоминать
         )
     ''')
     conn.commit()
@@ -91,6 +93,14 @@ def init_db():
         cursor.execute("UPDATE tasks SET status = 'active' WHERE status IS NULL;")
         conn.commit()
 
+    # Проверяем и добавляем столбец remind_me, если его нет
+    if 'remind_me' not in columns:
+        cursor.execute("ALTER TABLE tasks ADD COLUMN remind_me INTEGER DEFAULT 0;")
+        conn.commit()
+        # Обновляем существующие задачи, чтобы remind_me по умолчанию был 0
+        cursor.execute("UPDATE tasks SET remind_me = 0 WHERE remind_me IS NULL;")
+        conn.commit()
+
     try:
         cursor.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_user_task_number ON tasks (user_id, task_number);")
         conn.commit()
@@ -98,6 +108,15 @@ def init_db():
         logging.warning(
             f"Could not create unique index 'idx_user_task_number': {e}. Please check your database for duplicate (user_id, task_number) pairs if this warning persists.")
 
+    #  Создаем таблицу для статуса напоминаний пользователя (для контроля частоты)
+    # Это заменит предыдущую таблицу `reminders`
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS user_reminder_status (
+            user_id INTEGER PRIMARY KEY,
+            last_reminded_at TEXT -- Время последнего напоминания в формате YYYY-MM-DD HH:MM:SS
+        )
+    ''')
+    conn.commit()
     conn.close()
 
 
@@ -129,25 +148,18 @@ class AddTask(StatesGroup):
 
 
 class EditTask(StatesGroup):
-    # waiting_for_task_number = State() # No longer needed, handled by callback
     waiting_for_new_data = State()
     waiting_for_new_description = State()
     waiting_for_new_deadline = State()
 
 
 class DeleteTask(StatesGroup):
-    # waiting_for_task_number = State() # No longer needed, handled by callback
     waiting_for_confirmation = State()
-
-
-class CompleteTask(StatesGroup):
-    waiting_for_task_number = State()
 
 
 # роутеры
 welcome_router = Router()
 task_router = Router()
-
 
 PAGE_SIZE = 5  # Кол-во задач на странице для пагинации
 
@@ -181,10 +193,43 @@ class DeleteTaskCallback(CallbackData, prefix="delete_task"):
 class MainMenuCallback(CallbackData, prefix="main_menu"):
     action: str = "show"
 
+#  CallbackData для включения напоминаний для конкретной задачи
+class EnableReminderForTaskCallback(CallbackData, prefix="enable_task_rem"):
+    task_internal_id: int
+
+#  CallbackData для меню напоминаний
+class RemindersMenuCallback(CallbackData, prefix="rem_menu"):
+    page: int = 0
+    action: str = "view" # 'view', 'remove_task_reminder', 'disable_all'
+
+#  CallbackData для удаления напоминания для конкретной задачи
+class RemoveTaskReminderCallback(CallbackData, prefix="remove_task_rem"):
+    task_internal_id: int
+    current_page: int = 0 # Для возврата на ту же страницу после удаления
+
+#  CallbackData для отключения всех напоминаний
+class DisableAllRemindersCallback(CallbackData, prefix="disable_all_rem"):
+    pass
+
+
 # Новая функция для генерации инлайн-клавиатуры "Главное меню"
 def get_main_menu_inline_keyboard():
     builder = InlineKeyboardBuilder()
     builder.add(types.InlineKeyboardButton(text="🏠 Главное меню", callback_data=MainMenuCallback().pack()))
+    return builder.as_markup()
+
+# НОВАЯ ФУНКЦИЯ: Клавиатура для сообщения об успешном добавлении в напоминания
+def get_reminder_confirmation_keyboard():
+    builder = InlineKeyboardBuilder()
+    builder.add(types.InlineKeyboardButton(
+        text="Все напоминания",
+        callback_data=RemindersMenuCallback(page=0, action="view").pack()
+    ))
+    builder.add(types.InlineKeyboardButton(
+        text="🏠 Главное меню",
+        callback_data=MainMenuCallback().pack()
+    ))
+    builder.adjust(1) # Кнопки в один столбец
     return builder.as_markup()
 
 
@@ -323,14 +368,65 @@ def build_edit_task_keyboard(tasks, page=0):
 def build_delete_task_keyboard(tasks, page=0):
     return build_task_selection_keyboard(tasks, DeleteTaskCallback, page)
 
+#  Функция для построения клавиатуры напоминаний
+def build_reminders_keyboard(tasks, page=0):
+    builder = InlineKeyboardBuilder()
+    start = page * PAGE_SIZE
+    end = start + PAGE_SIZE
+    page_tasks = tasks[start:end]
+
+    if not page_tasks and page > 0:
+        return build_reminders_keyboard(tasks, page - 1)
+    elif not page_tasks:
+        builder.row(types.InlineKeyboardButton(text="🏠 Главное меню", callback_data=MainMenuCallback().pack()))
+        return builder.as_markup()
+
+    for internal_id, task_number, description, deadline in page_tasks: # Получаем internal_id
+        formatted_deadline = format_deadline(deadline)
+        deadline_str = f" ({formatted_deadline})" if formatted_deadline else ""
+        button_text = f"✅ {task_number}. {description[:30]}{'...' if len(description) > 30 else ''}{deadline_str}"
+
+        builder.row(types.InlineKeyboardButton(
+            text=button_text,
+            callback_data=RemoveTaskReminderCallback(task_internal_id=internal_id, current_page=page).pack()
+        ))
+
+    nav_buttons = []
+    if page > 0:
+        nav_buttons.append(types.InlineKeyboardButton(
+            text="⬅️ Назад",
+            callback_data=RemindersMenuCallback(page=page - 1, action="view").pack()
+        ))
+    if end < len(tasks):
+        nav_buttons.append(types.InlineKeyboardButton(
+            text="Вперед ➡️",
+            callback_data=RemindersMenuCallback(page=page + 1, action="view").pack()
+        ))
+    if nav_buttons:
+        builder.row(*nav_buttons)
+
+    builder.row(types.InlineKeyboardButton(
+        text="❌ Отключить все напоминания",
+        callback_data=DisableAllRemindersCallback().pack()
+    ))
+    builder.row(types.InlineKeyboardButton(
+        text="🏠 Главное меню",
+        callback_data=MainMenuCallback().pack()
+    ))
+    return builder.as_markup()
+
 
 # Вспомогательная функция получения задач с фильтром и статусом
-def get_tasks_for_user(user_id: int, filter_type: str, status_filter: str = 'active'):
+def get_tasks_for_user(user_id: int, filter_type: str, status_filter: str = 'active', remind_me_filter: bool = None):
     conn = sqlite3.connect(DATABASE_NAME)
     cursor = conn.cursor()
 
-    query = "SELECT task_number, description, deadline FROM tasks WHERE user_id = ? AND status = ?"
+    query = "SELECT id, task_number, description, deadline FROM tasks WHERE user_id = ? AND status = ?"
     params = [user_id, status_filter]
+
+    if remind_me_filter is not None:
+        query += " AND remind_me = ?"
+        params.append(1 if remind_me_filter else 0)
 
     current_date = datetime.now()
 
@@ -389,7 +485,8 @@ async def send_task_list(target_message_or_query: types.Message | types.Callback
 
         response = response_header
         selected_tasks = tasks if not task_limit else tasks[-5::1]
-        for task_number, description, deadline in selected_tasks:
+        # Изменяем извлечение, так как get_tasks_for_user теперь возвращает id
+        for internal_id, task_number, description, deadline in selected_tasks:
             formatted_deadline = format_deadline(deadline)
             deadline_str = f" (Срок выполнения: {formatted_deadline})" if formatted_deadline else ""
             response += f"Номер: {task_number}.\n   Задача: {description}{deadline_str}\n"
@@ -480,19 +577,170 @@ async def process_add_deadline_calendar(callback_query: types.CallbackQuery, cal
         max_task_number = cursor.fetchone()[0]
         new_task_number = (max_task_number or 0) + 1
 
-        cursor.execute("INSERT INTO tasks (user_id, task_number, description, deadline, status) VALUES (?, ?, ?, ?, ?)",
-                       (user_id, new_task_number, description, deadline_str, 'active'))
+        # Вставляем remind_me = 0 по умолчанию
+        cursor.execute("INSERT INTO tasks (user_id, task_number, description, deadline, status, remind_me) VALUES (?, ?, ?, ?, ?, ?)",
+                       (user_id, new_task_number, description, deadline_str, 'active', 0))
+        internal_task_id = cursor.lastrowid # Получаем внутренний ID только что добавленной задачи
         conn.commit()
         conn.close()
 
         formatted_deadline_display = format_deadline(deadline_str)
+        # Отправляем начальное сообщение без кнопок напоминания, затем добавляем кнопки
         await callback_query.message.edit_text(
-            f"✍ Задача '{description}' (Номер: {new_task_number}) со сроком выполнения '{formatted_deadline_display}' добавлена!\n"
-            f"Хотите ещё? /add_task \nПосмотреть все задачи: /list_tasks")
+            f"✍ Задача '{description}' (Номер: {new_task_number}) со сроком выполнения '{formatted_deadline_display}' добавлена!")
+
+        #Предложение включить напоминания для КОНКРЕТНОЙ задачи (только одна кнопка)
+        reminder_text = "Если хотите, чтобы я напомнил вам о задаче, жмите кнопку 👇"
+        builder = InlineKeyboardBuilder()
+        builder.add(types.InlineKeyboardButton(
+            text="Напомнить о задаче",
+            callback_data=EnableReminderForTaskCallback(task_internal_id=internal_task_id).pack()
+        ))
+        builder.add(types.InlineKeyboardButton(
+            text="🏠 Главное меню",
+            callback_data=MainMenuCallback().pack()
+        ))
+        builder.adjust(1)  # Размещаем кнопки в один столбец для лучшего вида
+        await callback_query.message.answer(reminder_text, reply_markup=builder.as_markup())
+
         await state.clear()
         await callback_query.answer()
     else:
         await callback_query.answer()
+
+#Обработчик для включения напоминаний для конкретной задачи
+@task_router.callback_query(EnableReminderForTaskCallback.filter())
+async def process_enable_reminder_for_task_callback(callback_query: types.CallbackQuery, callback_data: EnableReminderForTaskCallback):
+    task_id_to_remind = callback_data.task_internal_id
+    user_id = callback_query.from_user.id
+
+    conn = sqlite3.connect(DATABASE_NAME)
+    cursor = conn.cursor()
+    try:
+        cursor.execute("UPDATE tasks SET remind_me = 1 WHERE id = ? AND user_id = ? AND status = 'active'",
+                       (task_id_to_remind, user_id))
+        conn.commit()
+
+        # Также убедимся, что пользователь есть в таблице user_reminder_status для фоновых проверок
+        cursor.execute("INSERT OR IGNORE INTO user_reminder_status (user_id, last_reminded_at) VALUES (?, ?)",
+                       (user_id, datetime.now().strftime('%Y-%m-%d %H:%M:%S')))
+        conn.commit()
+
+        await callback_query.message.edit_text(
+            "Задача успешно добавлена в напоминание, я буду напоминать вам о незавершенных делах раз в час.",
+            reply_markup=get_reminder_confirmation_keyboard() # ИСПОЛЬЗУЕМ НОВУЮ ФУНКЦИЮ ДЛЯ КЛАВИАТУРЫ
+        )
+    except Exception as e:
+        logging.error(f"Error enabling reminder for task {task_id_to_remind} by user {user_id}: {e}")
+        await callback_query.message.edit_text("Произошла ошибка при включении напоминания.", reply_markup=get_main_menu_inline_keyboard())
+    finally:
+        conn.close()
+    await callback_query.answer()
+
+# Обработчик команды /reminders (для просмотра и управления напоминаниями)
+@task_router.message(Command("reminders"))
+async def cmd_reminders(message: types.Message):
+    user_id = message.from_user.id
+    # Получаем задачи, для которых включено напоминание
+    remindable_tasks = get_tasks_for_user(user_id, filter_type="all", status_filter='active', remind_me_filter=True)
+
+    if not remindable_tasks:
+        await message.answer("У вас пока нет задач, для которых включены напоминания.", reply_markup=get_main_menu_inline_keyboard())
+        return
+
+    keyboard = build_reminders_keyboard(remindable_tasks, page=0)
+    await message.answer("🔔 Ваши задачи с напоминаниями (нажмите, чтобы убрать):", reply_markup=keyboard)
+
+
+#  Обработчик callback для меню напоминаний (пагинация)
+@task_router.callback_query(RemindersMenuCallback.filter())
+async def process_reminders_menu_callback(callback_query: types.CallbackQuery, callback_data: RemindersMenuCallback):
+    user_id = callback_query.from_user.id
+    current_page = callback_data.page
+
+    remindable_tasks = get_tasks_for_user(user_id, filter_type="all", status_filter='active', remind_me_filter=True)
+
+    if not remindable_tasks and current_page == 0: # Если задач больше нет и это первая страница
+        await callback_query.message.edit_text("У вас больше нет задач с включенными напоминаниями.", reply_markup=get_main_menu_inline_keyboard())
+        await callback_query.answer()
+        return
+
+    keyboard = build_reminders_keyboard(remindable_tasks, page=current_page)
+    try:
+        await callback_query.message.edit_reply_markup(reply_markup=keyboard)
+    except aiogram.exceptions.TelegramBadRequest as e:
+        if "message is not modified" not in str(e):
+            raise e
+    await callback_query.answer()
+
+
+#Обработчик callback для удаления напоминания для конкретной задачи
+@task_router.callback_query(RemoveTaskReminderCallback.filter())
+async def process_remove_task_reminder_callback(callback_query: types.CallbackQuery, callback_data: RemoveTaskReminderCallback):
+    task_id_to_remove_reminder = callback_data.task_internal_id
+    current_page = callback_data.current_page
+    user_id = callback_query.from_user.id
+
+    conn = sqlite3.connect(DATABASE_NAME)
+    cursor = conn.cursor()
+    try:
+        cursor.execute("UPDATE tasks SET remind_me = 0 WHERE id = ? AND user_id = ?",
+                       (task_id_to_remove_reminder, user_id))
+        conn.commit()
+        await callback_query.answer("Напоминание по задаче отключено.", show_alert=False)
+
+        # Обновляем список напоминаний
+        remindable_tasks = get_tasks_for_user(user_id, filter_type="all", status_filter='active', remind_me_filter=True)
+        if not remindable_tasks:
+            await callback_query.message.edit_text("У вас больше нет задач с включенными напоминаниями.", reply_markup=get_main_menu_inline_keyboard())
+        else:
+            keyboard = build_reminders_keyboard(remindable_tasks, page=current_page)
+            try:
+                await callback_query.message.edit_reply_markup(reply_markup=keyboard)
+            except aiogram.exceptions.TelegramBadRequest as e:
+                if "message is not modified" not in str(e):
+                    raise e
+
+    except Exception as e:
+        logging.error(f"Error removing reminder for task {task_id_to_remove_reminder} by user {user_id}: {e}")
+        await callback_query.answer("Произошла ошибка при отключении напоминания.", show_alert=True)
+        # Если произошла ошибка, можно попробовать обновить клавиатуру
+        remindable_tasks = get_tasks_for_user(user_id, filter_type="all", status_filter='active', remind_me_filter=True)
+        keyboard = build_reminders_keyboard(remindable_tasks, page=current_page)
+        try:
+            await callback_query.message.edit_reply_markup(reply_markup=keyboard)
+        except aiogram.exceptions.TelegramBadRequest:
+            pass # Игнорируем, если сообщение не изменилось
+    finally:
+        conn.close()
+
+
+# Обработчик callback для отключения всех напоминаний
+@task_router.callback_query(DisableAllRemindersCallback.filter())
+async def process_disable_all_reminders_callback(callback_query: types.CallbackQuery):
+    user_id = callback_query.from_user.id
+
+    conn = sqlite3.connect(DATABASE_NAME)
+    cursor = conn.cursor()
+    try:
+        # Отключаем напоминания для всех активных задач пользователя
+        cursor.execute("UPDATE tasks SET remind_me = 0 WHERE user_id = ? AND status = 'active'", (user_id,))
+        conn.commit()
+
+        # Удаляем запись пользователя из таблицы user_reminder_status, чтобы он больше не получал напоминаний
+        cursor.execute("DELETE FROM user_reminder_status WHERE user_id = ?", (user_id,))
+        conn.commit()
+
+        await callback_query.message.edit_text(
+            "Все напоминания отключены. Вы можете включить их снова для конкретных задач при их добавлении или командой /reminders.", # Указываем команду /reminders
+            reply_markup=get_main_menu_inline_keyboard()
+        )
+    except Exception as e:
+        logging.error(f"Error disabling all reminders for user {user_id}: {e}")
+        await callback_query.message.edit_text("Произошла ошибка при отключении всех напоминаний.", reply_markup=get_main_menu_inline_keyboard())
+    finally:
+        conn.close()
+    await callback_query.answer()
 
 
 # Обработчик команды /list_tasks
@@ -596,7 +844,7 @@ async def process_complete_task_callback(callback_query: types.CallbackQuery, ca
             return
         task_description = task_info[0]
 
-        cursor.execute("UPDATE tasks SET status = 'completed' WHERE user_id = ? AND task_number = ? AND status = 'active'",
+        cursor.execute("UPDATE tasks SET status = 'completed', remind_me = 0 WHERE user_id = ? AND task_number = ? AND status = 'active'", #  remind_me = 0 при завершении
                        (user_id, selected_task_number))
         conn.commit()
         conn.close()
@@ -865,8 +1113,6 @@ async def process_delete_task_callback(callback_query: types.CallbackQuery, call
         await callback_query.answer()
 
 
-
-
 @task_router.message(DeleteTask.waiting_for_confirmation, F.text.in_({"Да", "Нет"}))
 async def process_delete_confirmation(message: types.Message, state: FSMContext):
     if message.text == "Да":
@@ -878,6 +1124,7 @@ async def process_delete_confirmation(message: types.Message, state: FSMContext)
 
         conn = sqlite3.connect(DATABASE_NAME)
         cursor = conn.cursor()
+        #  При удалении задачи, напоминания по ней тоже отключаются.
         cursor.execute("DELETE FROM tasks WHERE id = ? AND user_id = ? AND status = 'active'",
                        (internal_db_id, user_id))
         conn.commit()
@@ -895,11 +1142,78 @@ async def process_delete_confirmation(message: types.Message, state: FSMContext)
     await state.clear()
 
 
+#  Фоновая задача для отправки напоминаний
+async def send_hourly_reminders(bot: Bot):
+    while True:
+        await asyncio.sleep(3600)  # Ждем 1 час (3600 секунд)
+        logging.info("Running hourly reminders check...")
+        conn = sqlite3.connect(DATABASE_NAME)
+        cursor = conn.cursor()
+
+        # Получаем user_id всех пользователей, у которых есть хоть одна задача с remind_me = 1
+        # И где время последнего напоминания (или его отсутствие) указывает, что пора напомнить
+        cursor.execute("""
+            SELECT DISTINCT t.user_id, urs.last_reminded_at
+            FROM tasks t
+            JOIN user_reminder_status urs ON t.user_id = urs.user_id
+            WHERE t.remind_me = 1 AND t.status = 'active'
+        """)
+        users_to_check = cursor.fetchall()
+
+        current_time = datetime.now()
+
+        for user_id, last_reminded_str in users_to_check:
+            should_remind = False
+            if not last_reminded_str:
+                should_remind = True  # Если никогда не напоминали, то напоминаем
+            else:
+                last_reminded_dt = datetime.strptime(last_reminded_str, '%Y-%m-%d %H:%M:%S')
+                # Если с последнего напоминания прошел час или более
+                if (current_time - last_reminded_dt) >= timedelta(hours=1):
+                    should_remind = True
+
+            if should_remind:
+                # Получаем количество активных задач на СЕГОДНЯ, для которых включено напоминание
+                today_date_str = current_time.strftime('%Y-%m-%d')
+                cursor.execute("""
+                    SELECT COUNT(*) FROM tasks
+                    WHERE user_id = ? AND status = 'active' AND deadline = ? AND remind_me = 1
+                """, (user_id, today_date_str))
+                active_today_remindable_task_count = cursor.fetchone()[0]
+
+                if active_today_remindable_task_count > 0:
+                    reminder_message = f"Привет! На сегодня у тебя {active_today_remindable_task_count} незавершенных задач, по которым я должен напомнить!"
+                    builder = InlineKeyboardBuilder()
+                    builder.add(types.InlineKeyboardButton(
+                        text="Посмотреть задачи",
+                        callback_data=TaskListFilterCallback(filter_type="today").pack() # Кнопка для просмотра задач на сегодня
+                    ))
+                    try:
+                        await bot.send_message(chat_id=user_id, text=reminder_message, reply_markup=builder.as_markup())
+                        # Обновляем время последнего напоминания в user_reminder_status
+                        cursor.execute("UPDATE user_reminder_status SET last_reminded_at = ? WHERE user_id = ?",
+                                       (current_time.strftime('%Y-%m-%d %H:%M:%S'), user_id))
+                        conn.commit()
+                        logging.info(f"Reminder sent to user {user_id} for {active_today_remindable_task_count} today's remindable tasks.")
+                    except aiogram.exceptions.TelegramForbiddenError:
+                        logging.warning(f"Bot blocked by user {user_id}. Removing from user_reminder_status and setting remind_me=0 for their tasks.")
+                        # Удаляем пользователя из таблицы user_reminder_status, если он заблокировал бота
+                        cursor.execute("DELETE FROM user_reminder_status WHERE user_id = ?", (user_id,))
+                        # Отключаем все напоминания для этого пользователя
+                        cursor.execute("UPDATE tasks SET remind_me = 0 WHERE user_id = ?", (user_id,))
+                        conn.commit()
+                    except Exception as e:
+                        logging.error(f"Error sending reminder to user {user_id}: {e}")
+        conn.close()
+
+
 # Главная функция запуска бота
 async def main():
     init_db()
     dp.include_router(welcome_router)
     dp.include_router(task_router)
+    #  Запускаем фоновую задачу напоминаний
+    asyncio.create_task(send_hourly_reminders(bot))
     await dp.start_polling(bot)
 
 
