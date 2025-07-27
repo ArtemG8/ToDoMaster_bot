@@ -29,13 +29,14 @@ welcome_text = """
    ⏰ Устанавливать сроки выполнения для каждой задачи, чтобы ничего не упустить.
    🔔 Настраивать таймеры и напоминания, чтобы вовремя приступать к работе и успевать в срок.
 
-Забудь о забытых задачах и невыполненных планах!
+Забудь о забытых задачах и невыполненных планов!
 Начнем прямо сейчас?
 
 Для добавления задачи используй /add_task
 Для просмотра задач используй /list_tasks
 Для редактирования задачи используй /edit_task
 Для удаления задачи используй /delete_task
+Для просмотра напоминаний используй /reminders
 """
 
 # Инициализация бота и диспетчера
@@ -114,6 +115,15 @@ def init_db():
         CREATE TABLE IF NOT EXISTS user_reminder_status (
             user_id INTEGER PRIMARY KEY,
             last_reminded_at TEXT -- Время последнего напоминания в формате YYYY-MM-DD HH:MM:SS
+        )
+    ''')
+    conn.commit()
+
+    # Создаем таблицу для статистики пользователя (счетчик завершенных задач)
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS user_stats (
+            user_id INTEGER PRIMARY KEY,
+            completed_tasks_count INTEGER DEFAULT 0
         )
     ''')
     conn.commit()
@@ -286,7 +296,7 @@ def build_task_selection_keyboard(tasks, callback_constructor, page=0):
         builder.row(types.InlineKeyboardButton(text="❌ Отмена", callback_data=MainMenuCallback().pack()))
         return builder.as_markup()
 
-    for task_number, description, deadline in page_tasks:
+    for internal_id, task_number, description, deadline in page_tasks:
         formatted_deadline = format_deadline(deadline)
         deadline_str = f" ({formatted_deadline})" if formatted_deadline else ""
         # Shorten description for button text if too long
@@ -330,8 +340,7 @@ def build_complete_task_keyboard(tasks, filter_type, page=0):
         builder.row(types.InlineKeyboardButton(text="❌ Отмена", callback_data=TaskListFilterCallback(filter_type=filter_type).pack()))
         return builder.as_markup()
 
-
-    for task_number, description, deadline in page_tasks:
+    for internal_id, task_number, description, deadline in page_tasks:
         formatted_deadline = format_deadline(deadline)
         deadline_str = f" ✅({formatted_deadline})" if formatted_deadline else ""
         button_text = f"{task_number}{deadline_str}"
@@ -381,6 +390,7 @@ def build_reminders_keyboard(tasks, page=0):
         builder.row(types.InlineKeyboardButton(text="🏠 Главное меню", callback_data=MainMenuCallback().pack()))
         return builder.as_markup()
 
+    # Эта функция уже была корректна, так как распаковывала 4 значения
     for internal_id, task_number, description, deadline in page_tasks: # Получаем internal_id
         formatted_deadline = format_deadline(deadline)
         deadline_str = f" ({formatted_deadline})" if formatted_deadline else ""
@@ -421,6 +431,7 @@ def get_tasks_for_user(user_id: int, filter_type: str, status_filter: str = 'act
     conn = sqlite3.connect(DATABASE_NAME)
     cursor = conn.cursor()
 
+    # Здесь всегда выбираются 4 столбца: id, task_number, description, deadline
     query = "SELECT id, task_number, description, deadline FROM tasks WHERE user_id = ? AND status = ?"
     params = [user_id, status_filter]
 
@@ -582,6 +593,14 @@ async def process_add_deadline_calendar(callback_query: types.CallbackQuery, cal
                        (user_id, new_task_number, description, deadline_str, 'active', 0))
         internal_task_id = cursor.lastrowid # Получаем внутренний ID только что добавленной задачи
         conn.commit()
+
+        # Поздравление с первой добавленной задачей
+        if new_task_number == 1:
+            cursor.execute("INSERT OR IGNORE INTO user_stats (user_id, completed_tasks_count) VALUES (?, 0)", (user_id,))
+            conn.commit()
+            await callback_query.message.answer("Поздравляем с вашей первой задачей! Спасибо что выбрали нас 😉",
+                                                reply_markup=get_main_menu_inline_keyboard())
+
         conn.close()
 
         formatted_deadline_display = format_deadline(deadline_str)
@@ -825,36 +844,59 @@ async def process_complete_task_callback(callback_query: types.CallbackQuery, ca
     tasks = get_tasks_for_user(user_id, filter_type=filter_type, status_filter='active')
 
     if selected_task_number is not None:
-        # Пользователь выбрал задачу для завершения
         conn = sqlite3.connect(DATABASE_NAME)
         cursor = conn.cursor()
-        cursor.execute("SELECT description FROM tasks WHERE user_id = ? AND task_number = ? AND status = 'active'",
-                       (user_id, selected_task_number))
-        task_info = cursor.fetchone()
-        if not task_info:
-            await callback_query.answer("Задача не найдена или уже завершена.", show_alert=True)
-            conn.close()
-            # Если задача не найдена, обновляем список
-            keyboard = build_complete_task_keyboard(tasks, filter_type, page)
-            try:
-                await callback_query.message.edit_reply_markup(reply_markup=keyboard)
-            except aiogram.exceptions.TelegramBadRequest as e:
-                if "message is not modified" not in str(e):
-                    raise e
-            return
-        task_description = task_info[0]
+        try:
+            # Пользователь выбрал задачу для завершения
+            cursor.execute("SELECT description FROM tasks WHERE user_id = ? AND task_number = ? AND status = 'active'",
+                           (user_id, selected_task_number))
+            task_info = cursor.fetchone()
+            if not task_info:
+                await callback_query.answer("Задача не найдена или уже завершена.", show_alert=True)
+                # Если задача не найдена, обновляем список
+                keyboard = build_complete_task_keyboard(tasks, filter_type, page)
+                try:
+                    await callback_query.message.edit_reply_markup(reply_markup=keyboard)
+                except aiogram.exceptions.TelegramBadRequest as e:
+                    if "message is not modified" not in str(e):
+                        raise e
+                return # Exit here
 
-        cursor.execute("UPDATE tasks SET status = 'completed', remind_me = 0 WHERE user_id = ? AND task_number = ? AND status = 'active'", #  remind_me = 0 при завершении
-                       (user_id, selected_task_number))
-        conn.commit()
-        conn.close()
+            task_description = task_info[0]
 
-        if cursor.rowcount > 0:
-            # Обновляем и показываем оригинальный список задач с кнопками
-            await send_task_list(callback_query.message, user_id, filter_type=filter_type, status_filter='active')
-            await callback_query.answer(f"Задача '{task_description}' (Номер: {selected_task_number}) завершена.")
-        else:
-            await callback_query.answer("Не удалось завершить задачу.", show_alert=True)
+            cursor.execute("UPDATE tasks SET status = 'completed', remind_me = 0 WHERE user_id = ? AND task_number = ? AND status = 'active'", #  remind_me = 0 при завершении
+                           (user_id, selected_task_number))
+            conn.commit()
+
+            if cursor.rowcount > 0:
+                # Update user_stats
+                cursor.execute("INSERT OR IGNORE INTO user_stats (user_id, completed_tasks_count) VALUES (?, 0)", (user_id,))
+                cursor.execute("UPDATE user_stats SET completed_tasks_count = completed_tasks_count + 1 WHERE user_id = ?", (user_id,))
+                conn.commit()
+
+                cursor.execute("SELECT completed_tasks_count FROM user_stats WHERE user_id = ?", (user_id,))
+                completed_tasks_count = cursor.fetchone()[0]
+
+                congrats_message = ""
+                if completed_tasks_count == 10:
+                    congrats_message = "У вас уже 10 задач! Вероятно, вы на пути к идеальной продуктивности 🪷"
+                elif completed_tasks_count == 100:
+                    congrats_message = "У вас уже 100 задач! Дела идут в гору, а вы становитесь лучше чем вчера. Я прав? 👁"
+                elif completed_tasks_count == 500:
+                    congrats_message = "у вас целых 500 задач! Вы гуру продуктивности!🌓"
+                elif completed_tasks_count == 1000:
+                    congrats_message = "1000 завершенных задач - Вы настоящий бог продуктивности!🤞 🧘"
+
+                # Обновляем и показываем оригинальный список задач с кнопками
+                await send_task_list(callback_query.message, user_id, filter_type=filter_type, status_filter='active')
+                await callback_query.answer(f"Задача '{task_description}' (Номер: {selected_task_number}) завершена.")
+
+                if congrats_message:
+                    await callback_query.message.answer(congrats_message)
+            else:
+                await callback_query.answer("Не удалось завершить задачу.", show_alert=True)
+        finally:
+            conn.close() # Ensure connection is closed
     else:
         # Переход по страницам пагинации
         keyboard = build_complete_task_keyboard(tasks, filter_type, page=page)
@@ -1225,4 +1267,3 @@ if __name__ == "__main__":
         print("Бот остановлен.")
     except Exception as e:
         print(f"Произошла ошибка: {e}")
-
