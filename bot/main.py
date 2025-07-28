@@ -32,11 +32,11 @@ welcome_text = """
 Забудь о забытых задачах и невыполненных планов!
 Начнем прямо сейчас?
 
-Для добавления задачи используй /add_task
-Для просмотра задач используй /list_tasks
-Для редактирования задачи используй /edit_task
-Для удаления задачи используй /delete_task
-Для просмотра напоминаний используй /reminders
+Для добавления задачи используйте /add_task
+Для завершения и просмотра задач используйте  /list_tasks
+Для редактирования задачи используйте  /edit_task
+Для удаления задачи используйте  /delete_task
+Для просмотра напоминаний используйте  /reminders
 """
 
 # Инициализация бота и диспетчера
@@ -221,25 +221,24 @@ class RemoveTaskReminderCallback(CallbackData, prefix="remove_task_rem"):
 class DisableAllRemindersCallback(CallbackData, prefix="disable_all_rem"):
     pass
 
-
-# Новая функция для генерации инлайн-клавиатуры "Главное меню"
+# функция для генерации инлайн-клавиатуры "Главное меню"
 def get_main_menu_inline_keyboard():
     builder = InlineKeyboardBuilder()
     builder.add(types.InlineKeyboardButton(text="🏠 Главное меню", callback_data=MainMenuCallback().pack()))
     return builder.as_markup()
 
-# НОВАЯ ФУНКЦИЯ: Клавиатура для сообщения об успешном добавлении в напоминания
+# Функция клавиатура для сообщения об успешном добавлении в напоминания
 def get_reminder_confirmation_keyboard():
     builder = InlineKeyboardBuilder()
-    builder.add(types.InlineKeyboardButton(
+    builder.row(types.InlineKeyboardButton(
         text="Все напоминания",
         callback_data=RemindersMenuCallback(page=0, action="view").pack()
     ))
-    builder.add(types.InlineKeyboardButton(
+    builder.row(types.InlineKeyboardButton(
         text="🏠 Главное меню",
         callback_data=MainMenuCallback().pack()
     ))
-    builder.adjust(1) # Кнопки в один столбец
+
     return builder.as_markup()
 
 
@@ -288,18 +287,18 @@ def build_task_selection_keyboard(tasks, callback_constructor, page=0):
     end = start + PAGE_SIZE
     page_tasks = tasks[start:end]
 
-    # Handle case where the current page becomes empty after an action (e.g., deletion)
+    # Обработка случая, когда текущая страница становится пустой после какого-либо действия (например, удаления)
     if not page_tasks and page > 0:
-        # Try to navigate to the previous page
+        # попытка перейти на предыдущую страницу
         return build_task_selection_keyboard(tasks, callback_constructor, page - 1)
-    elif not page_tasks: # No tasks at all or on first page with no tasks
+    elif not page_tasks: # Нет задачи вообще или на первой странице без задач
         builder.row(types.InlineKeyboardButton(text="❌ Отмена", callback_data=MainMenuCallback().pack()))
         return builder.as_markup()
 
     for internal_id, task_number, description, deadline in page_tasks:
         formatted_deadline = format_deadline(deadline)
         deadline_str = f" ({formatted_deadline})" if formatted_deadline else ""
-        # Shorten description for button text if too long
+        # сокращенное описание текста кнопки, если оно слишком длинное
         button_text = f"{task_number}. {description[:30]}{'...' if len(description) > 30 else ''}{deadline_str}"
 
         builder.row(types.InlineKeyboardButton(
@@ -390,7 +389,6 @@ def build_reminders_keyboard(tasks, page=0):
         builder.row(types.InlineKeyboardButton(text="🏠 Главное меню", callback_data=MainMenuCallback().pack()))
         return builder.as_markup()
 
-    # Эта функция уже была корректна, так как распаковывала 4 значения
     for internal_id, task_number, description, deadline in page_tasks: # Получаем internal_id
         formatted_deadline = format_deadline(deadline)
         deadline_str = f" ({formatted_deadline})" if formatted_deadline else ""
@@ -431,7 +429,6 @@ def get_tasks_for_user(user_id: int, filter_type: str, status_filter: str = 'act
     conn = sqlite3.connect(DATABASE_NAME)
     cursor = conn.cursor()
 
-    # Здесь всегда выбираются 4 столбца: id, task_number, description, deadline
     query = "SELECT id, task_number, description, deadline FROM tasks WHERE user_id = ? AND status = ?"
     params = [user_id, status_filter]
 
@@ -536,7 +533,6 @@ async def send_task_list(target_message_or_query: types.Message | types.Callback
 # Обработчик команды /start
 @welcome_router.message(Command("start"))
 async def start_command(message: types.Message):
-
     await message.answer(welcome_text)
 
 
@@ -608,7 +604,7 @@ async def process_add_deadline_calendar(callback_query: types.CallbackQuery, cal
         await callback_query.message.edit_text(
             f"✍ Задача '{description}' (Номер: {new_task_number}) со сроком выполнения '{formatted_deadline_display}' добавлена!")
 
-        #Предложение включить напоминания для КОНКРЕТНОЙ задачи (только одна кнопка)
+        #Предложение включить напоминания для конкретной задачи (только одна кнопка)
         reminder_text = "Если хотите, чтобы я напомнил вам о задаче, жмите кнопку 👇"
         builder = InlineKeyboardBuilder()
         builder.add(types.InlineKeyboardButton(
@@ -640,14 +636,14 @@ async def process_enable_reminder_for_task_callback(callback_query: types.Callba
                        (task_id_to_remind, user_id))
         conn.commit()
 
-        # Также убедимся, что пользователь есть в таблице user_reminder_status для фоновых проверок
+        # Убедимся, что пользователь есть в таблице user_reminder_status для фоновых проверок
         cursor.execute("INSERT OR IGNORE INTO user_reminder_status (user_id, last_reminded_at) VALUES (?, ?)",
                        (user_id, datetime.now().strftime('%Y-%m-%d %H:%M:%S')))
         conn.commit()
 
         await callback_query.message.edit_text(
             "Задача успешно добавлена в напоминание, я буду напоминать вам о незавершенных делах раз в час.",
-            reply_markup=get_reminder_confirmation_keyboard() # ИСПОЛЬЗУЕМ НОВУЮ ФУНКЦИЮ ДЛЯ КЛАВИАТУРЫ
+            reply_markup=get_reminder_confirmation_keyboard()
         )
     except Exception as e:
         logging.error(f"Error enabling reminder for task {task_id_to_remind} by user {user_id}: {e}")
@@ -820,7 +816,7 @@ async def process_complete_task_action(callback_query: types.CallbackQuery, call
         # Вместо изменения текста сообщения, просто меняем клавиатуру на кнопку выбора задач для завершения
         keyboard = build_complete_task_keyboard(tasks, filter_type, page=0)
 
-        # Обновляем реквизиты — оставляем текст без изменений, меняем только клавиатуру
+        # Обновляем  — оставляем текст без изменений, меняем только клавиатуру
         try:
             await callback_query.message.edit_reply_markup(reply_markup=keyboard)
         except aiogram.exceptions.TelegramBadRequest as e:
@@ -860,7 +856,7 @@ async def process_complete_task_callback(callback_query: types.CallbackQuery, ca
                 except aiogram.exceptions.TelegramBadRequest as e:
                     if "message is not modified" not in str(e):
                         raise e
-                return # Exit here
+                return
 
             task_description = task_info[0]
 
@@ -896,7 +892,7 @@ async def process_complete_task_callback(callback_query: types.CallbackQuery, ca
             else:
                 await callback_query.answer("Не удалось завершить задачу.", show_alert=True)
         finally:
-            conn.close() # Ensure connection is closed
+            conn.close()
     else:
         # Переход по страницам пагинации
         keyboard = build_complete_task_keyboard(tasks, filter_type, page=page)
@@ -921,7 +917,7 @@ async def cmd_edit_task(message: types.Message, state: FSMContext):
 
     keyboard = build_edit_task_keyboard(tasks, page=0)
     await message.answer("✏ Выберите задачу для редактирования:", reply_markup=keyboard)
-    # State is not set here, it will be set by the callback handler once a task is selected.
+
 
 
 @task_router.callback_query(EditTaskCallback.filter())
@@ -937,7 +933,6 @@ async def process_edit_task_callback(callback_query: types.CallbackQuery, callba
         return
 
     if callback_data.action == "view":
-        # Handle pagination
         keyboard = build_edit_task_keyboard(tasks, page=callback_data.page)
         try:
             await callback_query.message.edit_reply_markup(reply_markup=keyboard)
@@ -946,7 +941,6 @@ async def process_edit_task_callback(callback_query: types.CallbackQuery, callba
                 raise e
         await callback_query.answer()
     elif callback_data.action == "select":
-        # User selected a task
         selected_task_number = callback_data.task_number
 
         conn = sqlite3.connect(DATABASE_NAME)
@@ -1267,3 +1261,4 @@ if __name__ == "__main__":
         print("Бот остановлен.")
     except Exception as e:
         print(f"Произошла ошибка: {e}")
+
