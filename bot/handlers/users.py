@@ -541,9 +541,10 @@ async def process_edit_task_callback(callback_query: types.CallbackQuery, callba
 
 @task_router.message(EditTask.waiting_for_new_data, F.text.in_({"Описание", "Срок выполнения", "Отмена"}))
 async def process_edit_field_selection(message: types.Message, state: FSMContext):
+
     if message.text == "Отмена":
         await message.answer("Редактирование отменено.",
-                             reply_markup=get_main_menu_inline_keyboard())
+                             reply_markup=ReplyKeyboardRemove())
         await state.clear()
         return
 
