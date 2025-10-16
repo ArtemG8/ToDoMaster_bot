@@ -74,6 +74,13 @@ def init_db():
     ''')
     conn.commit()
 
+    # Добавляем колонку интервала напоминаний, если отсутствует
+    cursor.execute("PRAGMA table_info(user_reminder_status)")
+    urs_columns = [col[1] for col in cursor.fetchall()]
+    if 'interval_hours' not in urs_columns:
+        cursor.execute("ALTER TABLE user_reminder_status ADD COLUMN interval_hours INTEGER DEFAULT 1;")
+        conn.commit()
+
     # Создаем таблицу для статистики пользователя (счетчик завершенных задач)
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS user_stats (

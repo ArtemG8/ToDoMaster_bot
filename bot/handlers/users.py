@@ -24,6 +24,7 @@ from keyboards.inline import (
     build_edit_task_keyboard,
     build_delete_task_keyboard,
     build_reminders_keyboard,
+    build_reminder_intervals_keyboard,
     TaskListFilterCallback,
     TaskActionCallback,
     CompleteTaskCallback,
@@ -31,6 +32,8 @@ from keyboards.inline import (
     DeleteTaskCallback,
     MainMenuCallback,
     EnableReminderForTaskCallback,
+    ReminderIntervalMenuCallback,
+    SetReminderIntervalCallback,
     RemindersMenuCallback,
     RemoveTaskReminderCallback,
     DisableAllRemindersCallback
@@ -175,8 +178,7 @@ async def process_add_deadline_calendar(callback_query: types.CallbackQuery, cal
         if new_task_number == 1:
             cursor.execute("INSERT OR IGNORE INTO user_stats (user_id, completed_tasks_count) VALUES (?, 0)", (user_id,))
             conn.commit()
-            await callback_query.message.answer("Поздравляем с вашей первой задачей! Спасибо что выбрали нас 😉",
-                                                reply_markup=get_main_menu_inline_keyboard())
+            await callback_query.message.answer("Поздравляем с вашей первой задачей! Спасибо что выбрали нас 😉")
 
         conn.close()
 
@@ -202,11 +204,38 @@ async def process_add_deadline_calendar(callback_query: types.CallbackQuery, cal
     else:
         await callback_query.answer()
 
-# Обработчик для включения напоминаний для конкретной задачи
+# Обработчик для включения напоминаний для конкретной задачи — показ меню интервалов
 @task_router.callback_query(EnableReminderForTaskCallback.filter())
 async def process_enable_reminder_for_task_callback(callback_query: types.CallbackQuery, callback_data: EnableReminderForTaskCallback):
     task_id_to_remind = callback_data.task_internal_id
+    try:
+        await callback_query.message.edit_text(
+            "Выберите, как часто напоминать об этой задаче:",
+            reply_markup=build_reminder_intervals_keyboard(task_id_to_remind, page=0)
+        )
+    except aiogram.exceptions.TelegramBadRequest as e:
+        if "message is not modified" not in str(e):
+            raise e
+    await callback_query.answer()
+
+# Пагинация меню интервалов
+@task_router.callback_query(ReminderIntervalMenuCallback.filter())
+async def process_reminder_interval_menu_callback(callback_query: types.CallbackQuery, callback_data: ReminderIntervalMenuCallback):
+    try:
+        await callback_query.message.edit_reply_markup(
+            reply_markup=build_reminder_intervals_keyboard(callback_data.task_internal_id, page=callback_data.page)
+        )
+    except aiogram.exceptions.TelegramBadRequest as e:
+        if "message is not modified" not in str(e):
+            raise e
+    await callback_query.answer()
+
+# Сохранение выбранного интервала
+@task_router.callback_query(SetReminderIntervalCallback.filter())
+async def process_set_reminder_interval_callback(callback_query: types.CallbackQuery, callback_data: SetReminderIntervalCallback):
     user_id = callback_query.from_user.id
+    task_id_to_remind = callback_data.task_internal_id
+    hours = callback_data.hours
 
     conn = sqlite3.connect(DATABASE_NAME)
     cursor = conn.cursor()
@@ -219,13 +248,16 @@ async def process_enable_reminder_for_task_callback(callback_query: types.Callba
                        (user_id, datetime.now().strftime('%Y-%m-%d %H:%M:%S')))
         conn.commit()
 
+        cursor.execute("UPDATE user_reminder_status SET interval_hours = ? WHERE user_id = ?", (hours, user_id))
+        conn.commit()
+
         await callback_query.message.edit_text(
-            "Задача успешно добавлена в напоминание, я буду напоминать вам о незавершенных делах раз в час.",
+            f"Готово! Буду напоминать об этой задаче каждые {hours} ч.",
             reply_markup=get_reminder_confirmation_keyboard()
         )
     except Exception as e:
-        logging.error(f"Error enabling reminder for task {task_id_to_remind} by user {user_id}: {e}")
-        await callback_query.message.edit_text("Произошла ошибка при включении напоминания.", reply_markup=get_main_menu_inline_keyboard())
+        logging.error(f"Error setting reminder interval {hours}h for task {task_id_to_remind} by user {user_id}: {e}")
+        await callback_query.message.edit_text("Произошла ошибка при сохранении интервала напоминаний.", reply_markup=get_main_menu_inline_keyboard())
     finally:
         conn.close()
     await callback_query.answer()

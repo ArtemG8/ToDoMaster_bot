@@ -36,6 +36,14 @@ class MainMenuCallback(CallbackData, prefix="main_menu"):
 class EnableReminderForTaskCallback(CallbackData, prefix="enable_task_rem"):
     task_internal_id: int
 
+class ReminderIntervalMenuCallback(CallbackData, prefix="rem_interval_menu"):
+    task_internal_id: int
+    page: int = 0
+
+class SetReminderIntervalCallback(CallbackData, prefix="set_rem_interval"):
+    task_internal_id: int
+    hours: int
+
 class RemindersMenuCallback(CallbackData, prefix="rem_menu"):
     page: int = 0
     action: str = "view"
@@ -224,6 +232,47 @@ def build_reminders_keyboard(tasks, page=0):
         text="❌ Отключить все напоминания",
         callback_data=DisableAllRemindersCallback().pack()
     ))
+    builder.row(types.InlineKeyboardButton(
+        text="🏠 Главное меню",
+        callback_data=MainMenuCallback().pack()
+    ))
+    return builder.as_markup()
+
+def build_reminder_intervals_keyboard(task_internal_id: int, page: int = 0):
+    builder = InlineKeyboardBuilder()
+    # Пагинация интервалов 1..12 часов, по 4 на страницу
+    all_hours = list(range(1, 13))
+    per_page = 4
+    start = page * per_page
+    end = start + per_page
+    page_hours = all_hours[start:end]
+
+    if not page_hours and page > 0:
+        return build_reminder_intervals_keyboard(task_internal_id, page - 1)
+    elif not page_hours:
+        builder.row(types.InlineKeyboardButton(text="🏠 Главное меню", callback_data=MainMenuCallback().pack()))
+        return builder.as_markup()
+
+    for h in page_hours:
+        builder.row(types.InlineKeyboardButton(
+            text=f"Напоминать раз в: {h} ч",
+            callback_data=SetReminderIntervalCallback(task_internal_id=task_internal_id, hours=h).pack()
+        ))
+
+    nav_buttons = []
+    if page > 0:
+        nav_buttons.append(types.InlineKeyboardButton(
+            text="⬅️ Назад",
+            callback_data=ReminderIntervalMenuCallback(task_internal_id=task_internal_id, page=page - 1).pack()
+        ))
+    if end < len(all_hours):
+        nav_buttons.append(types.InlineKeyboardButton(
+            text="Вперед ➡️",
+            callback_data=ReminderIntervalMenuCallback(task_internal_id=task_internal_id, page=page + 1).pack()
+        ))
+    if nav_buttons:
+        builder.row(*nav_buttons)
+
     builder.row(types.InlineKeyboardButton(
         text="🏠 Главное меню",
         callback_data=MainMenuCallback().pack()

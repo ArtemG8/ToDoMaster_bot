@@ -29,7 +29,7 @@ async def send_hourly_reminders(bot: Bot):
         # Получаем user_id всех пользователей, у которых есть хоть одна задача с remind_me = 1
         # И где время последнего напоминания (или его отсутствие) указывает, что пора напомнить
         cursor.execute("""
-            SELECT DISTINCT t.user_id, urs.last_reminded_at
+            SELECT DISTINCT t.user_id, urs.last_reminded_at, COALESCE(urs.interval_hours, 1) as interval_hours
             FROM tasks t
             JOIN user_reminder_status urs ON t.user_id = urs.user_id
             WHERE t.remind_me = 1 AND t.status = 'active'
@@ -38,14 +38,14 @@ async def send_hourly_reminders(bot: Bot):
 
         current_time = datetime.now()
 
-        for user_id, last_reminded_str in users_to_check:
+        for user_id, last_reminded_str, interval_hours in users_to_check:
             should_remind = False
             if not last_reminded_str:
                 should_remind = True  # Если никогда не напоминали, то напоминаем
             else:
                 last_reminded_dt = datetime.strptime(last_reminded_str, '%Y-%m-%d %H:%M:%S')
-                # Если с последнего напоминания прошел час или более
-                if (current_time - last_reminded_dt) >= timedelta(hours=1):
+                # Если с последнего напоминания прошел указанный интервал или более
+                if (current_time - last_reminded_dt) >= timedelta(hours=interval_hours or 1):
                     should_remind = True
 
             if should_remind:
