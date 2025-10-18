@@ -1,0 +1,50 @@
+# created by virtualenv automatically
+*
+# PyCharm-specific files
+.idea/             # PyCharm project settings folder
+*.iml              # PyCharm module files
+
+# Python-specific files
+__pycache__/       # Python 3 bytecode cache
+*.pyc              # Python 2 bytecode
+.pytest_cache/     # pytest cache directory
+.venv/             # Virtual environment directory (common name)
+venv/              # Another common virtual environment name
+env/               # Yet another common virtual environment name
+*/bin/activate     # Virtual environment activation script
+
+# Editor-specific files (if any other editors are used)
+.vscode/           # VS Code settings
+*.sublime-project
+*.sublime-workspace
+
+# Operating System Files
+.DS_Store          # macOS specific
+Thumbs.db          # Windows specific
+
+# Logs and temporary files
+*.log
+*.tmp
+*.temp
+
+# Configuration files (if they contain sensitive info or are machine-specific)
+# Be careful with this - if config is needed by other devs, don't ignore it.
+# Instead, you might ignore specific values or provide a template.
+# config.ini
+# settings.py
+.env
+
+# Database files (if you use a local SQLite database for development)
+*.sqlite3
+db.sqlite3
+
+# Test coverage output
+.coverage
+
+# Jupyter Notebook files
+.ipynb_checkpoints/
+
+# Distribution / build files
+dist/
+build/
+*.egg-info/
